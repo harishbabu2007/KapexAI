@@ -60,6 +60,8 @@ enum Agent {
   RESEARCH
   REPORT
   GUARDRAIL
+  CHAT
+  TOOL
 }
 
 enum Status {

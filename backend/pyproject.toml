@@ -12,8 +12,13 @@ dependencies = [
     "uvicorn>=0.28.0",
     "db-service",
     "redis-service",
+    "python-jose>=3.5.0",
+    "httpx>=0.28.1",
 ]
 
 [tool.uv.sources]
 db-service = { workspace = true }
 redis-service = { workspace = true }
+
+[tool.setuptools.packages.find]
+include = ["backend*"]

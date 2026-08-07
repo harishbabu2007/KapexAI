@@ -1,6 +1,5 @@
-from prisma import Json
-
 from db_service import db
+from prisma import Json
 
 
 async def get_user_by_email(email: str):
@@ -13,6 +12,10 @@ async def create_user(email: str, name: str = ""):
 
 async def update_user_name(user_id: str, name: str):
     return await db.user.update(where={"id": user_id}, data={"name": name})
+
+
+async def get_session(session_id: str):
+    return await db.session.find_unique(where={"id": session_id})
 
 
 async def get_latest_session(user_id: str):
@@ -34,6 +37,15 @@ async def update_session_business_idea(session_id: str, business_idea: str):
     )
 
 
+async def mark_session_failed(session_id: str):
+    return await db.session.update(
+        where={"id": session_id}, data={"status": "FAILED"}
+    )
+
+async def mark_session_active(session_id: str):
+    return await db.session.update(where={"id": session_id}, data={"status": "ACTIVE"})
+
+
 async def add_message(session_id: str, role: str, agent: str, content: dict):
     return await db.message.create(
         data={
@@ -45,22 +57,31 @@ async def add_message(session_id: str, role: str, agent: str, content: dict):
     )
 
 
-async def get_resume_state(user_id: str) -> dict:
-    session = await get_latest_session(user_id)
-    if session is None:
-        return {"session_id": None, "answers": {}}
+def _empty_state(session_id: str, user_id: str) -> dict:
+    return {
+        "session_id": session_id,
+        "user_id": user_id,
+        "user_input": "",
+        "messages": [],
+        "intent": "",
+        "tool": "",
+    }
 
+
+async def build_state_from_db(session) -> dict:
+    """Rebuilds the message-log state for a session from its chat history,
+    ordered by creation time so the conversation is reconstructed in sequence."""
     messages = await db.message.find_many(
         where={"sessionId": session.id},
         order={"created_at": "asc"},
     )
 
-    answers: dict[str, str] = {}
+    state = _empty_state(session.id, session.userId)
+    log = []
     for msg in messages:
-        if (
-            msg.agent == "QUESTIONNAIRE"
-            and isinstance(msg.content, dict)
-            and msg.content.get("type") == "answer"
-        ):
-            answers[msg.content["key"]] = msg.content["content"]
-    return {"session_id": session.id, "answers": answers}
+        content = msg.content
+        if not isinstance(content, dict):
+            content = {}
+        log.append({"role": msg.role, "agent": msg.agent, **content})
+    state["messages"] = log
+    return state

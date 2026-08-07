@@ -1,16 +1,26 @@
-from worker.prompts.system_prompt import SYSTEM_PROMPT, ANSWER_TEMPLATE
-from worker.prompts.query_generator import QUERY_GENERATOR_PROMPT, QUERY_GENERATOR_TEMPLATE
-from worker.prompts.questionnaire import QUESTIONS
-from worker.prompts.research import RESEARCH_PROMPT
-from worker.prompts.report import REPORT_PROMPT, REPORT_TEMPLATE
+from worker.prompts.chat import CHAT_PROMPT, CHAT_TEMPLATE
+from worker.prompts.questionnaire import (
+    MAX_QUESTIONS,
+    PARSE_ANSWERS_PROMPT,
+    PARSE_ANSWERS_TEMPLATE,
+    PLAN_QUESTIONNAIRE_PROMPT,
+    PLAN_QUESTIONNAIRE_TEMPLATE,
+)
+from worker.prompts.research_websearch import RESEARCH_WEBSEARCH_PROMPT
+from worker.prompts.router import ROUTER_PROMPT, ROUTER_TEMPLATE
+from worker.prompts.swot import SWOT_PROMPT, SWOT_TEMPLATE
 
 __all__ = [
-    "SYSTEM_PROMPT",
-    "ANSWER_TEMPLATE",
-    "QUERY_GENERATOR_PROMPT",
-    "QUERY_GENERATOR_TEMPLATE",
-    "QUESTIONS",
-    "RESEARCH_PROMPT",
-    "REPORT_PROMPT",
-    "REPORT_TEMPLATE",
+    "CHAT_PROMPT",
+    "CHAT_TEMPLATE",
+    "MAX_QUESTIONS",
+    "PARSE_ANSWERS_PROMPT",
+    "PARSE_ANSWERS_TEMPLATE",
+    "PLAN_QUESTIONNAIRE_PROMPT",
+    "PLAN_QUESTIONNAIRE_TEMPLATE",
+    "RESEARCH_WEBSEARCH_PROMPT",
+    "ROUTER_PROMPT",
+    "ROUTER_TEMPLATE",
+    "SWOT_PROMPT",
+    "SWOT_TEMPLATE",
 ]

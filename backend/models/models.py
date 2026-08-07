@@ -5,6 +5,19 @@ class WaitlistSignup(BaseModel):
     email: EmailStr
     name: str | None = None
 
+class GoogleTokenRequest(BaseModel):
+    credential: str
+
 class CreateChatSession(BaseModel):
-    email: EmailStr
-    business_idea: str
+    content: str
+
+class UserChatMessage(BaseModel):
+    session_id: str
+    content: str
+
+class RenameSessionRequest(BaseModel):
+    session_id: str
+    name: str
+
+class DeleteSessionRequest(BaseModel):
+    session_id: str

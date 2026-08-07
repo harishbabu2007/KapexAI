@@ -66,10 +66,13 @@ shutdown → await disconnect_db() → await disconnect_redis()
 
 ### Worker
 
-Currently only uses `db-service`:
+Connects both services on startup (it uses the DB for persistence and Redis for
+the job queue + pub/sub streaming):
 
 ```python
 await connect_db()
+await connect_redis()
 # ... main loop ...
+await disconnect_redis()
 await disconnect_db()
 ```

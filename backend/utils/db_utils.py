@@ -9,4 +9,21 @@ async def get_user(email: str):
     )
 
     return user
-    
+
+async def get_session(session_id: str):
+    session = await db.session.find_unique(
+        where={
+            'id': session_id
+        }
+    )
+
+    return session
+
+async def get_all_sessions(user):
+    sessions = await db.session.find_many(
+        where={
+            'userId': user.id
+        }
+    )
+
+    return sessions

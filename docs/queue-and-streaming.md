@@ -1,6 +1,8 @@
 # Queue & Streaming
 
-This document explains how the backend enqueues jobs and streams results back to the frontend via Redis.
+This document explains how the backend enqueues jobs and streams results back to
+the frontend via Redis. For the agentic side (router, tools, message log, state)
+see [agentic-pipeline.md](agentic-pipeline.md).
 
 ## Flow overview
 
@@ -11,119 +13,125 @@ Frontend                    Backend                      Worker
    │─────────────────────────►│                           │
    │                          │  1. Create Session (DB)   │
    │                          │  2. LPUSH jobs:queue      │
-   │  { session_id }          │──────────────────────────►│
+   │  { session_id, job_id }  │──────────────────────────►│
    │◄─────────────────────────│  3. BRPOP jobs:queue      │
    │                          │                           │
    │  WS /ws/session/{id}     │                           │
    │════════════════════════►│                           │
-   │                          │  4. Run agentic workflow  │
-   │                          │                           │
+   │                          │  4. Run langgraph graph   │
    │                          │  5. PUBLISH stream:{id}   │
    │◄═════════════════════════│◄──────────────────────────│
-   │     { type: "token" }    │      (via redis.publish)  │
+   │   { type: "chat" }       │   (via redis.publish)     │
    │◄═════════════════════════│◄──────────────────────────│
-   │     { type: "token" }    │                           │
+   │   { type: "suggestions" }│                           │
    │◄═════════════════════════│◄──────────────────────────│
-   │     { type: "end" }      │                           │
+   │   { type: "end" }        │                           │
 ```
 
 ## Job queue (`jobs:queue`)
 
-The backend pushes jobs to a Redis list. The worker pops them.
+The backend pushes jobs to a Redis list. The worker block-pops them.
 
 ### Backend — enqueue
 
-In `POST /create_chat_session` (`backend/main.py:68-69`):
+`POST /create_chat_session` and `POST /push_chat_message` both enqueue the same
+job shape (`backend/main.py`):
 
 ```python
-job = {"session_id": session.id, "user_input": user_data.business_idea}
+job = {
+    "job_id": str(uuid4()),
+    "session_id": session.id,
+    "user_input": user_data.content,
+}
 await redis.lpush("jobs:queue", json.dumps(job))
 ```
 
 ### Worker — dequeue
 
-The worker should block-pop from the queue in its main loop:
+`worker/main.py` block-pops from the queue in its main loop and hands each job
+to `process_job`:
 
 ```python
-import json
-from redis_service import redis
-
 while not stop.is_set():
     result = await redis.brpop("jobs:queue", timeout=5)
     if result is None:
         continue
-
-    key, raw = result  # key is "jobs:queue"
+    _, raw = result
     job = json.loads(raw)
-    session_id = job["session_id"]
-    user_input = job["user_input"]
-
-    # --- run agentic workflow ---
-    # ...
+    await process_job(job, graph)
 ```
+
+## Processing a job (`worker/agent.py`)
+
+For each job the worker:
+
+1. **Loads state** — reads `langgraph_state:{session_id}` from Redis. If absent,
+   it rebuilds the message log from the session's chat history in the DB
+   (ordered by `created_at`).
+2. **Injects the user message** into the state and runs the graph.
+3. **Saves state** back to Redis (24h TTL) and persists the produced messages to
+   the `Message` table.
+4. **Publishes** assistant results to the session's stream channel, followed by
+   a `suggestions` frame and an `end` frame.
+
+Every user message is persisted. The `Message.agent` column is `CHAT` for chat
+messages and `TOOL` for tool messages; the tool-specific JSON shape lives in the
+`content` column (`type` + extra fields). See
+[agentic-pipeline.md](agentic-pipeline.md) for the full message formats.
+
+### Error handling
+
+If a job fails, the worker marks the session `FAILED` and publishes an error
+frame to the session's stream channel:
+
+```json
+{"type": "error", "job_id": "…", "content": "Job … failed"}
+```
+
+The WebSocket forwards it to the frontend. Both backend endpoints return the
+`job_id` in their responses so failures can be correlated.
 
 ## Streaming results (`stream:{session_id}`)
 
-The worker publishes results to a Redis pub/sub channel. The WebSocket endpoint subscribes to that channel and forwards messages to the frontend.
-
-### Worker — publish
-
-After (or during) processing, the worker publishes each chunk to the session's channel:
-
-```python
-await redis.publish(f"stream:{session_id}", json.dumps({"type": "token", "content": "Hello"}))
-# ... more tokens ...
-await redis.publish(f"stream:{session_id}", json.dumps({"type": "end"}))
-```
-
-### Backend WebSocket — subscribe
-
-`GET /ws/session/{session_id}` (`backend/main.py:77-92`):
-
-```python
-@app.websocket("/ws/session/{session_id}")
-async def websocket_stream(websocket: WebSocket, session_id: str):
-    await websocket.accept()
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(f"stream:{session_id}")
-
-    async for message in pubsub.listen():
-        if message["type"] == "message":
-            data = json.loads(message["data"])
-            await websocket.send_json(data)
-            if data.get("type") == "end":
-                break
-
-    await pubsub.unsubscribe(f"stream:{session_id}")
-    await pubsub.close()
-    await websocket.close()
-```
+The worker publishes to the session's pub/sub channel. The backend WebSocket
+(`/ws/session/{session_id}`) subscribes and forwards each frame to the frontend.
 
 ### Message protocol
 
-Each message published to `stream:{session_id}` is a JSON string with this shape:
+Each message published to `stream:{session_id}` is a JSON string:
 
-| Field | Type | Description |
+| `type` | Payload | Description |
 |---|---|---|
-| `type` | `string` | Message type — `"token"`, `"end"`, or future types |
-| `content` | `string` | The chunk content (only present for `"token"` type) |
+| `chat` | `content` | A chat reply |
+| `questionnaire` | `content`, `questions`, `facts` | Questionnaire questions, presented at once |
+| `questionnaire_complete` | `content`, `context` | Acknowledges the answers received |
+| `swot` | `content`, `sections`, `summary` | SWOT analysis result |
+| `research` | `content` | Web search result |
+| `suggestions` | `tools: [{name, description, example, suggestion}]` | "wanna try this next?" suggestions |
+| `error` | `job_id`, `content` | Job failed; the session is marked `FAILED` |
+| `end` | — | Signals the stream is finished; the WebSocket closes |
 
-The frontend receives these as JSON frames over the WebSocket. It should concatenate `"token"` payloads until it receives `"end"`.
+The frontend should render each frame as it arrives and stop when it receives
+`end`. User-generated messages are not streamed (the client already has them).
 
 ## Session status
 
-The `Session.status` enum (`services/database/schema.prisma`) tracks lifecycle:
+`Session.status` (`services/database/schema.prisma`) tracks lifecycle:
 
 | Status | Meaning |
 |---|---|
-| `PENDING` | Initial state after creation (should be default) |
-| `ACTIVE` | Worker is processing or has completed |
-| `FAILED` | Worker encountered an error |
-
-The worker should update the session status in the database as it processes.
+| `ACTIVE` | Default; the worker is processing or has completed |
+| `FAILED` | The worker encountered an error processing a job for this session |
 
 ## Key considerations
 
-- **Pub/sub is fire-and-forget** — if no WebSocket is connected, published messages are lost. The worker should still save the assistant's full response as a `Message` row in the database for history.
-- **One channel per session** — `stream:{session_id}` is unique per session. Only one WebSocket client should connect per session.
-- **Cleanup** — consider calling `await redis.expire(f"stream:{session_id}", 3600)` after the session ends to remove any residual data if you switch to a list-based approach.
+- **Pub/sub is fire-and-forget** — if no WebSocket is connected, published
+  messages are lost; the `Message` table is the durable record.
+- **One channel per session** — `stream:{session_id}` is unique per session.
+  Only one WebSocket client should connect per session.
+- **State persistence** — the state is stored at `langgraph_state:{session_id}`
+  (24h TTL). If it's gone, the worker rebuilds the message log from the DB, so
+  the conversation resumes instead of restarting.
+- **Job IDs** — the backend generates a `job_id` per job and returns it in the
+  API response; the worker includes it in error frames so failures can be
+  correlated to a specific submission.
