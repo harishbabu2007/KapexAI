@@ -35,6 +35,13 @@ def questionnaire_pending(messages: list[dict]) -> bool:
     return pending
 
 
+def questionnaire_complete(messages: list[dict]) -> bool:
+    """True when the questionnaire has been finished (a `questionnaire_complete`
+    entry exists). Tools that need business context must not run until this is
+    true — the router gates them on it."""
+    return last_message(messages, "questionnaire_complete") is not None
+
+
 def business_context(messages: list[dict]) -> dict:
     complete = last_message(messages, "questionnaire_complete")
     if complete:

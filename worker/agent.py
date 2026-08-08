@@ -15,12 +15,14 @@ from worker.helpers.messages import (
     append_message,
     business_context,
     format_transcript,
+    questionnaire_complete,
     questionnaire_pending,
 )
 from worker.helpers.persistence import (
     add_message,
     build_state_from_db,
     get_session,
+    mark_session_active,
     mark_session_failed,
 )
 from worker.tools.registry import get_tool, list_tools
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 STATE_KEY = "langgraph_state:{session_id}"
 STATE_TTL = 60 * 60 * 24  # 24 hours
+PENDING_KEY = "pending:{session_id}"
 
 
 class State(TypedDict):
@@ -48,14 +51,25 @@ async def router_node(state: State) -> dict:
     """Routes the user's message to a chat reply or a specific tool. On a fresh
     session the LLM decides whether to greet (chat) or kick off the
     questionnaire; while a questionnaire is pending, answers are routed back to
-    it automatically."""
+    it automatically. Tools that need business context (SWOT, web research) are
+    gated: until the questionnaire is completed they are redirected to the
+    questionnaire tool so context exists before the tool runs."""
     if questionnaire_pending(state["messages"]):
         return {"intent": "tool", "tool": "questionnaire"}
+    
     decision = await router_agent.classify(
         state["user_input"], state["messages"], list_tools()
     )
+
     if decision.get("intent") == "tool" and get_tool(decision.get("tool", "")):
+        tool = get_tool(decision["tool"])
+        
+        if tool.name == "questionnaire" and questionnaire_complete(state["messages"]):
+            return {"intent": "chat"}
+        if tool.requires_context and not questionnaire_complete(state["messages"]):
+            return {"intent": "tool", "tool": "questionnaire"}
         return {"intent": "tool", "tool": decision["tool"]}
+    
     return {"intent": "chat"}
 
 
@@ -84,7 +98,10 @@ async def chat_node(state: State) -> dict:
     )
 
     await publish_stream(session_id, {"type": "chat", "content": reply})
-    await publish_suggestions(session_id)
+
+    if questionnaire_complete(state["messages"]):
+        await publish_suggestions(session_id, state["messages"])
+
     await publish_stream(session_id, {"type": "end"})
     return {"messages": messages}
 
@@ -109,13 +126,20 @@ async def tool_node(state: State) -> dict:
         if entry.get("role") == "ASSISTANT":
             await publish_stream(session_id, content)
 
-    await publish_suggestions(session_id)
+    if questionnaire_complete(messages):
+        await publish_suggestions(session_id, messages)
+
     await publish_stream(session_id, {"type": "end"})
     return {"messages": messages}
 
 
-async def publish_suggestions(session_id: str) -> None:
-    await publish_stream(session_id, {"type": "suggestions", "tools": list_tools()})
+async def publish_suggestions(session_id: str, messages: list[dict]) -> None:
+    """Streams the available tool suggestions. The questionnaire tool is left
+    out once it has been completed — re-offering it would be pointless."""
+    tools = list_tools()
+    if questionnaire_complete(messages):
+        tools = [t for t in tools if t["name"] != "questionnaire"]
+    await publish_stream(session_id, {"type": "suggestions", "tools": tools})
 
 
 def route(state: State) -> str:
@@ -177,11 +201,15 @@ async def process_job(job: dict, graph: CompiledStateGraph) -> State:
         state["user_input"] = user_input
         result = await graph.ainvoke(state)
         await save_state(session_id, result)
+        # The job is done — the backend's in-flight marker is no longer needed.
+        await redis.delete(PENDING_KEY.format(session_id=session_id))
+        await mark_session_active(session_id)
         return result
     except Exception:
         logger.exception("Failed to process session %s (job %s)", session_id, job_id)
         try:
             await mark_session_failed(session_id)
+            await redis.delete(PENDING_KEY.format(session_id=session_id))
             await publish_stream(
                 session_id,
                 {

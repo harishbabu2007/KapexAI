@@ -12,7 +12,7 @@ from worker.prompts.chat import CHAT_TEMPLATE
 
 class ChatAgent:
     def __init__(self) -> None:
-        self.llm = ChatMistralAI(model="mistral-small-2506", temperature=0.3)
+        self.llm = ChatMistralAI(model="mistral-small-2506", temperature=0.5)
 
     async def run(
         self,

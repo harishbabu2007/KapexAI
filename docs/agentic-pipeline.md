@@ -53,8 +53,17 @@ Decides how to handle the current message, in priority order:
    reads the tool registry and the transcript, and returns either
    `{"intent": "chat"}` or `{"intent": "tool", "tool": "<name>"}`. If the
    selected tool is not registered, it falls back to `chat`. On a new session
-   the router prompt tells the LLM to send greetings/small talk to `chat` and to
-   route a shared business idea to the `questionnaire` tool.
+   the router prompt tells the LLM to send greetings/small talk to `chat`, to
+   route a shared business idea to the `questionnaire` tool, and to route
+   "set up / start / build a business" to the questionnaire too — so a user who
+   wants guided setup gets the interview instead of an open-ended
+   "what do you need?".
+3. **Context gate** — tools flagged `requires_context = True` (SWOT, web
+   research) are only dispatched once the questionnaire has been **completed**
+   (`questionnaire_complete` in `worker/helpers/messages.py`). If the user asks
+   for one before then, the request is redirected to the `questionnaire` tool,
+   so business context exists before the tool runs. This stops tools from
+   producing generic output from an empty context.
 
 ### `chat_node`
 
@@ -67,7 +76,10 @@ Runs `ChatAgent` (a strictly business-focused consultant persona). It is given:
 
 It persists the user message and the reply as `CHAT` messages, then streams
 `chat` → `suggestions` → `end`. The persona handles greetings/small talk briefly
-but declines and redirects anything outside business topics.
+but declines and redirects anything outside business topics. It never repeats a
+question it already asked (a vague reply gets a concrete next step instead of the
+same "how can I help?"), and when there is no business context yet it
+proactively offers the guided questionnaire setup rather than looping.
 
 ### `tool_node`
 
@@ -150,11 +162,17 @@ register(WebSearchTool())
 
 ### Built-in tools
 
-| Tool | `type` (assistant msg) | What it does |
-|---|---|---|
-| `questionnaire` | `questionnaire` / `questionnaire_complete` | Multi-turn: asks up to 5 targeted questions on the first message, then parses the answers into structured business context |
-| `swot` | `swot` | Generates a SWOT analysis as structured sections |
-| `web_search` | `research` | Live web research via a Tavily-powered react agent |
+| Tool | `type` (assistant msg) | What it does | Needs questionnaire? |
+|---|---|---|---|
+| `questionnaire` | `questionnaire` / `questionnaire_complete` | Multi-turn: asks up to 5 targeted questions, then folds the answers into structured business context (slide UI in the frontend) | — |
+| `swot` | `swot` | Generates a SWOT analysis as structured sections | yes (`requires_context`) |
+| `web_search` | `research` | Live web research via a Tavily-powered react agent | yes (`requires_context`) |
+
+Every tool's `run(state)` has access to `state["messages"]` — the message log —
+so it can use both the collected business context (`business_context`) and the
+conversation transcript (`format_transcript`) alongside the current request.
+`SwotTool` interpolates both into its prompt template; `WebSearchTool` builds its
+react agent's system prompt per request from the same two sources.
 
 ## Message formats
 
@@ -174,11 +192,25 @@ distinguishes them; extra fields carry tool-specific data.
 |---|---|---|
 | USER | `questionnaire_start` | `content` (the business idea) |
 | ASSISTANT | `questionnaire` | `content`, `questions: [{key, question}]`, `facts: {...}` |
-| USER | `questionnaire_answer` | `content` (raw answers), `answers: {...}` |
-| ASSISTANT | `questionnaire_complete` | `content`, `context: {...}` (the parsed business context) |
+| USER | `questionnaire_answer` | `content` (numbered summary), `answers: {...}` |
+| ASSISTANT | `questionnaire_complete` | `content`, `context: {...}` (the collected business context) |
 
-The `context` from `questionnaire_complete` is what the chat agent and the SWOT
-tool use as *business context* for later turns.
+Answers are collected by the frontend's **slide questionnaire** (one question at
+a time, then submit). The frontend posts them as structured `{key, answer}`
+pairs to `POST /submit_questionnaire_answers`; the worker folds them into the
+context by key (no LLM parsing). Each non-empty answer is still validated
+per-question, so gibberish like `"asdf"`/`"hehe"` is rejected and re-asked
+instead of entering the business context. A user can still type answers
+free-form in the composer — the worker falls back to LLM validation + parsing
+for that path.
+
+The `context` from `questionnaire_complete` is what the chat agent and the
+context tools use as *business context* for later turns. Beyond that, the
+`swot` and `web_search` tools also receive the **full message transcript**
+(`format_transcript` in `worker/helpers/messages.py`) — the conversation history
+since the start of the session — and are told to ground their output in it, so
+analysis and research reflect everything the user has shared, not just the
+latest request.
 
 ### SWOT (`agent: "TOOL"`)
 
@@ -194,6 +226,11 @@ tool use as *business context* for later turns.
 | USER | `research_request` | `content` |
 | ASSISTANT | `research` | `content` |
 
+The research prompt asks for a **concise summary (~300 words)** using short
+bullets, ending with a short **"Next steps"** section that poses **2-3 specific
+follow-up questions** to the user (e.g. about their competitors, target
+demographics, or pricing) so the conversation keeps moving after the result.
+
 ## Streaming protocol
 
 Each node publishes JSON frames to the pub/sub channel `stream:{session_id}`
@@ -203,7 +240,7 @@ Each node publishes JSON frames to the pub/sub channel `stream:{session_id}`
 | `type` | Payload | Description |
 |---|---|---|
 | `chat` | `content` | A chat reply |
-| `questionnaire` | `content`, `questions`, `facts` | Questionnaire questions (all at once) |
+| `questionnaire` | `content`, `questions`, `facts` | Questionnaire questions (rendered as a slide UI, one at a time) |
 | `questionnaire_complete` | `content`, `context` | Acknowledges the collected answers |
 | `swot` | `content`, `sections`, `summary` | SWOT analysis result |
 | `research` | `content` | Web search result |
@@ -244,6 +281,8 @@ submission that caused it.
 - **Per-session serialization** — the queue is global, so two jobs for the same
   session are processed in arrival order by the single worker; with multiple
   workers you would need per-session locking.
-- **The questionnaire runs once** — the router sends it a shared business idea
-  (and any messages while questions are pending); once answered it never blocks
-  again. Greetings and small talk go to `chat` instead.
+- **The questionnaire runs once, and gates context tools** — the router sends it
+  a shared business idea (and any messages while questions are pending). Until
+  it completes, tools that need business context (`swot`, `web_search`) are
+  redirected to it; once answered it never blocks again. Greetings and small
+  talk go to `chat` instead.

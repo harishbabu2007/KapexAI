@@ -24,7 +24,13 @@ questions, then stores the answers as the business "context" that the chat
 agent and the other tools use later. Think of it as a polite interviewer:
 
 1. **Phase 1 — "Let's start"**: read the idea, plan the questions, ask them.
-2. **Phase 2 — "Let's listen"**: read the answers, validate them, store them.
+2. **Phase 2 — "Let's listen"**: collect the answers (via the frontend slide
+   UI or free-form text), store them as context.
+
+The tool is also the **gatekeeper** for the whole assistant: tools that need
+business context (SWOT, web research) are **not allowed to run** until this
+questionnaire completes. Asking for a SWOT before the interview is done just
+sends you here instead (see section 2).
 
 The tool is also a **bouncer**. It will *not* accept:
 - a command phrase like "Start the business questionnaire" as if it were a
@@ -55,7 +61,25 @@ User message → router_node → tool_node → QuestionnaireTool.run() → messa
 
   Otherwise it asks an LLM (`router_agent.classify`) whether the message is
   small talk (`chat`) or a request for a tool. The router is told that a new
-  business idea should be routed to the questionnaire tool.
+  business idea — and also "set up / start / build a business" — should be
+  routed to the questionnaire tool, so a user who wants guided setup gets the
+  interview instead of an open-ended "what do you need?". The chat agent also
+  proactively offers the questionnaire when there's no business context yet,
+  rather than repeating "how can I help?".
+
+  Finally there is a **context gate**: any tool with `requires_context = True`
+  (SWOT, web research) is redirected to the questionnaire tool until a
+  `questionnaire_complete` message exists:
+
+  ```python
+  # worker/agent.py:60
+  if tool.requires_context and not questionnaire_complete(state["messages"]):
+      return {"intent": "tool", "tool": "questionnaire"}
+  ```
+
+  So asking for a SWOT before the interview is done doesn't produce a generic
+  SWOT from an empty context — it routes you to the questionnaire to build
+  context first.
 
 - **`tool_node`** looks up the tool by name in `worker/tools/registry.py`,
   calls its `run()` method, then persists + streams whatever it returns.
@@ -200,18 +224,44 @@ async def _collect(self, state: dict) -> list[dict]:
 
     answers_text = str(state.get("user_input") or "").strip()
 
-    if not await self._validate(questions, answers_text):
-        return self._reask(questions, facts, answers_text)   # ← bouncer: bad answer
-
-    parsed = await self._parse(questions, answers_text)
-    for question, answer in zip(questions, parsed):
-        key = question.get("key", "")
-        if key:
-            facts[key] = answer
+    # Structured answers (submitted from the slide UI) arrive as a JSON
+    # payload and map 1:1 onto the questions by key — no LLM *parsing* needed.
+    # Each non-empty answer is still validated per-question; invalid ones
+    # (gibberish) are re-asked and never folded into the context.
+    structured = self._structured_answers(answers_text)
+    if structured is not None:
+        validity = await self._validate_structured(questions, structured)
+        submitted = {
+            str(a.get("key", "")): str(a.get("answer") or "").strip()
+            for a in structured
+        }
+        bad = []
+        for question in questions:
+            key = question.get("key", "")
+            answer = submitted.get(key, "")
+            if not answer:
+                continue
+            if validity.get(key, True):
+                facts[key] = answer
+            else:
+                bad.append(question)
+        if bad:
+            return self._reask(bad, facts, self._format_answers(bad, submitted))
+        content = self._format_answers(questions, facts)
+    else:
+        # Bouncer check #2: genuine free-form answer? If not, re-ask.
+        if not await self._validate(questions, answers_text):
+            return self._reask(questions, facts, answers_text)
+        parsed = await self._parse(questions, answers_text)
+        for question, answer in zip(questions, parsed):
+            key = question.get("key", "")
+            if key:
+                facts[key] = answer
+        content = answers_text
 
     return [
         {"role": "USER", "agent": "TOOL", "type": "questionnaire_answer",
-         "content": answers_text, "answers": facts},
+         "content": content, "answers": facts},
         {"role": "ASSISTANT", "agent": "TOOL", "type": "questionnaire_complete",
          "content": "Got it. I now have context about your business.",
          "context": facts},
@@ -224,21 +274,38 @@ Step by step:
    (`worker/helpers/messages.py:18`) scans backwards for the most recent
    `questionnaire` entry. Its `questions` and `facts` are copied so the new
    answer builds on them.
-2. **Bouncer check #2.** `_validate()` (section 8) asks the LLM: *"does this
-   reply genuinely answer the questions?"* If not (gibberish, off-topic,
-   refusal), we return `_reask()` (section 7). The key detail: **`_reask`
-   re-emits a `questionnaire` entry, not a `questionnaire_answer`**, so
-   `questionnaire_pending` stays **ON** and the interview continues.
-3. **Parse the free-form text.** `_parse()` (section 8) asks the LLM to align
-   the user's messy reply ("1) Pune 2) young professionals ...") to a JSON
-   array, one string per question (empty string if a question wasn't answered).
-4. **Merge into the facts.** Each parsed answer is stored under its question's
-   `key` (e.g. `q1`, `q2`, ...).
-5. **Return two entries**:
-   - `questionnaire_answer` (USER) — the raw answer + the full merged `facts`.
+2. **Two ways to answer.** There are now two paths:
+   - **Structured (default, from the slide UI).** The frontend collects one
+     answer per question and posts them to
+     `POST /submit_questionnaire_answers` as `[{key, answer}, ...]`. The worker
+     receives a JSON payload like
+     `{"kind": "questionnaire_answers", "answers": [...]}`; `_structured_answers()`
+     recognises it and maps each answer onto its question **by key** — no LLM
+     *parsing* is involved. But each non-empty answer is still checked by
+     `_validate_structured()` (section 8b): gibberish like `"asdf"`/`"hehe"` is
+     rejected so it never reaches the business context. Valid answers are folded
+     in and only the invalid questions are re-asked (valid ones persist), so a
+     genuine per-question answer is never lost.
+   - **Free-form (legacy, typed in the composer).** `_validate()` (section 8)
+     asks the LLM whether the reply genuinely answers the questions. If not
+     (gibberish, off-topic, refusal), we return `_reask()` (section 7) — which
+     re-emits a `questionnaire` entry, so `questionnaire_pending` stays **ON**
+     and the interview continues. If valid, `_parse()` aligns the messy text to
+     one JSON string per question.
+3. **Merge into the facts.** Each answer is stored under its question's `key`
+   (e.g. `q1`, `q2`, ...). For structured answers, `_format_answers()` also
+   builds a readable numbered summary (e.g. `"1) dried mango"`) for the message
+   log. Invalid answers are never written into `facts`.
+4. **Return two entries**:
+   - `questionnaire_answer` (USER) — the summary + the full merged `facts`.
      This flips `questionnaire_pending` to **OFF** → the questionnaire is done.
    - `questionnaire_complete` (ASSISTANT) — an acknowledgement carrying the
-     final `context`. This is the message `business_context()` looks for.
+     final `context`. This is the message `business_context()` looks for, and
+     the one that unlocks the context-gated tools.
+
+If every submitted structured answer was garbage, `_reask()` is returned instead
+of step 4: the questionnaire stays pending and no `questionnaire_complete` is
+ever emitted, so nothing nonsense enters the business context.
 
 ---
 
@@ -285,23 +352,82 @@ shows what happened), then **re-asks the same questions**. Re-emitting
 `questionnaire` keeps `questionnaire_pending` = **ON** — the loop repeats until
 the user gives real answers.
 
-> Both helpers are **synchronous** (no LLM call) — they just return message
-> entries. The LLM decisions happen in `_is_real_idea` / `_validate`.
+### Clarifying questions — "can you explain this in clearer words?"
+
+A message that isn't a genuine answer is **not always a rejection**. In
+`_collect`, when `_validate()` returns `False` the tool first runs
+`_is_clarification()` (a lightweight LLM call, `CLARIFY_REQUEST_TEMPLATE`). If
+the user is asking a question **about the questionnaire itself** — rephrasing
+something in simpler words, what a term means, why it's asked, or an example —
+`_explain()` answers it conversationally instead of re-asking:
+
+```python
+# worker/tools/questionnaire_tool.py — _explain()
+return [
+    {"role": "USER", "agent": "TOOL", "type": "chat", "content": user_text},
+    {"role": "ASSISTANT", "agent": "TOOL", "type": "chat",
+     "content": explanation},   # plain-language rephrase of the questions
+]
+```
+
+It emits two `chat` bubbles (`EXPLAIN_QUESTIONS_TEMPLATE` rephrases each question
+in simple words, focused on the one the user asked about). Because **no**
+`questionnaire_answer` is written, `questionnaire_pending` stays **ON** and the
+interview continues — the user's next message routes back into `_collect`. This
+fixes the trap where *"can you explain this in clear words"* was rejected as a
+botched answer and re-asked. On a `_is_clarification` parse hiccup it returns
+`False`, so the normal re-ask path is the safe fallback.
+
+`_is_clarification` is deliberately **permissive**: a clarification request
+mixed with partial answers (e.g. *"1) can you explain this question again 2)
+local this expand, 1cr"*) still counts as a clarification, so the user is
+explained to instead of being told their whole message didn't answer the
+questions.
+
+### Structured clarification (the deck's "Explain in simpler words" button)
+
+The slide deck exposes an **"Explain in simpler words"** button per question
+(`frontend/src/components/messages/QuestionnaireCard.tsx`). Clicking it posts to
+`POST /submit_questionnaire_clarification` (backend `main.py`) with
+`{session_id, keys: [questionKey]}`. The backend pushes a structured job whose
+`user_input` is `{"kind": "questionnaire_clarification", "keys": [...]}`.
+
+In `_collect`, before the free-form guardrail, `_structured_clarification()`
+recognises this payload and calls `_explain_keys()` — which filters to the
+requested questions and calls `_explain()`. The questionnaire stays pending and
+the user answers via the deck right after. No LLM validation is involved, so the
+request can never be misclassified as a bad answer.
+
+> Both `_reask` / `_request_idea` helpers are **synchronous** (no LLM call) —
+> they just return message entries. The LLM decisions happen in
+> `_is_real_idea` / `_validate` / `_is_clarification`.
 
 ---
 
-## 8. The four LLM calls (the "brains")
+## 8. The seven LLM calls (the "brains")
 
-All four use the same model (`mistral-small-2506`, `temperature=0`) and are
+All use the same model (`mistral-small-2506`, `temperature=0.1`) and are
 just a prompt template piped into the model. The prompts live in
 `worker/prompts/questionnaire.py`.
 
+> `_validate`, `_parse` and `_is_clarification` are only used for **free-form**
+> answers typed in the composer. Answers from the frontend slide UI arrive as
+> structured `{key, answer}` pairs — they skip *parsing* entirely, but are still
+> individually checked by `_validate_structured`. `_explain` is used both by the
+> free-form clarification path and by the deck's structured clarify button
+> (via `_explain_keys`).
+
 | Method | Prompt template | Input → Output | Failure mode |
 |---|---|---|---|
-| `_is_real_idea` (`:186`) | `IS_IDEA_TEMPLATE` | message → `{real_idea: bool}` | returns `False` (ask for idea) |
-| `_plan` (`:150`) | `PLAN_QUESTIONNAIRE_TEMPLATE` | idea → `{facts, questions[]}` | raises `ValueError` |
-| `_validate` (`:168`) | `VALIDATE_ANSWERS_TEMPLATE` | questions + reply → `{valid: bool}` | returns `True` (don't block real answers) |
-| `_parse` (`:158`) | `PARSE_ANSWERS_TEMPLATE` | questions + reply → `[answers]` | raises `TypeError` |
+| `_is_real_idea` (`:274`) | `IS_IDEA_TEMPLATE` | message → `{real_idea: bool}` | returns `False` (ask for idea) |
+| `_plan` (`:208`) | `PLAN_QUESTIONNAIRE_TEMPLATE` | idea → `{facts, questions[]}` | raises `ValueError` |
+| `_validate` (`:226`) | `VALIDATE_ANSWERS_TEMPLATE` | questions + free-form reply → `{valid: bool}` | returns `True` (don't block real answers) |
+| `_validate_structured` (`:244`) | `VALIDATE_STRUCTURED_ANSWERS_TEMPLATE` | questions + `[{key, answer}]` → `{key: valid}` | returns `{}` (nothing blocked) |
+| `_parse` (`:216`) | `PARSE_ANSWERS_TEMPLATE` | questions + free-form reply → `[answers]` | raises `TypeError` |
+| `_is_clarification` | `CLARIFY_REQUEST_TEMPLATE` | questions + free-form reply → `{clarification: bool}` | returns `False` (fall back to re-ask) |
+| `_explain` | `EXPLAIN_QUESTIONS_TEMPLATE` | user message + idea + questions → markdown explanation | falls back to `_reask` on empty output |
+| `_structured_clarification` | — (parses JSON) | text → `list[str]` (keys) or `None` | returns `None` (free-form path) |
+| `_explain_keys` | — (calls `_explain`) | questions + keys → `chat` bubbles | falls back to all questions |
 
 A typical call looks like:
 
@@ -325,6 +451,8 @@ Notes:
     rather than risk absorbing a command).
   - `_validate` → on a parse hiccup returns `True` (don't annoy a user who gave
     a genuine answer).
+  - `_validate_structured` → on a parse hiccup returns `{}`, which the caller
+    reads as "nothing blocked" (every submitted answer passes).
 
 ---
 
@@ -359,6 +487,11 @@ This dict is passed to the chat agent and other tools (see
 `worker/agent.py:65`, `chat_node`) so every reply knows the business it's
 talking about.
 
+**The context gate.** `worker/agent.py` refuses to run tools that declare
+`requires_context = True` (SWOT, web research) until
+`questionnaire_complete(messages)` returns `True` — i.e. until this dict is
+populated. Until then those requests are routed to the questionnaire tool.
+
 ---
 
 ## 10. Message types produced by this tool
@@ -366,15 +499,28 @@ talking about.
 | `type` | `role` | When it's emitted | Frontend rendering |
 |---|---|---|---|
 | `questionnaire_start` | USER | a real idea was accepted | user bubble |
-| `questionnaire` | ASSISTANT | questions asked (or re-asked) | questionnaire card |
-| `questionnaire_answer` | USER | valid answers collected | user bubble |
+| `questionnaire` | ASSISTANT | questions asked (or re-asked) | **slide questionnaire card** |
+| `questionnaire_answer` | USER | answers collected (structured or free-form) | user bubble (numbered summary) |
 | `questionnaire_complete` | ASSISTANT | answers acknowledged | "context saved" card |
 | `questionnaire_request` | USER | command phrase seen, idea requested | user bubble |
 | `questionnaire_invalid` | USER | nonsense answer rejected, re-ask sent | user bubble |
 
-The frontend renders unknown types as plain bubbles (see
-`frontend/src/components/messages/index.tsx`), so the two guardrail types
-(`questionnaire_request` / `questionnaire_invalid`) need no special UI.
+The `questionnaire` card renders as a **slide UI** (one question at a time with
+Back / Next / Submit) — see `frontend/src/components/messages/QuestionnaireCard.tsx`.
+Each slide also has an **"Explain in simpler words"** button that requests a
+plain-language explanation of that question (see section 7). When the
+questionnaire is already completed (or superseded by a re-ask), the card renders
+as a plain read-only list instead. The frontend renders unknown types as plain
+bubbles (see `frontend/src/components/messages/index.tsx`), so the two guardrail
+types (`questionnaire_request` / `questionnaire_invalid`) need no special UI.
+
+**The composer is locked while the deck is pending.** `useChatSession` computes
+`questionnairePending` (a `questionnaire` message with no later
+`questionnaire_answer` / `questionnaire_complete`) and `ChatPage` disables the
+main input bar while it's true. The user can't abandon the deck by typing a
+separate message; the only input channels are the deck itself and its
+"Explain in simpler words" button. The composer unlocks once the questionnaire
+completes.
 
 ---
 
@@ -402,19 +548,35 @@ The frontend renders unknown types as plain bubbles (see
 
 1. `router_node`: questionnaire pending → routes straight to the tool (no LLM).
 2. `_collect()` → `_validate(...)` → **false**.
-3. `_reask()` emits `questionnaire_invalid` (USER) + `questionnaire`
+3. `_is_clarification(...)` → **false** (it's nonsense, not a question).
+4. `_reask()` emits `questionnaire_invalid` (USER) + `questionnaire`
    (ASSISTANT) re-asking the same questions → `questionnaire_pending` stays
    **ON**. ✅ Nothing was absorbed.
 
-**Turn 4** — User: `"1) Competitors: Starbucks and Blue Tokai. 2) Rs 250-350 per cup. 3) Single-origin specialty beans."`
+**Turn 3b** — User (instead): `"1) can you explain this in clear words.."`
 
-1. `_collect()` → `_validate` → **true**.
-2. `_parse()` → `["Competitors: Starbucks and Blue Tokai.", "Rs 250-350 per cup.", "Single-origin specialty beans."]`.
-3. Facts merged under `q1`, `q2`, `q3`. `questionnaire_answer` +
-   `questionnaire_complete` emitted → `questionnaire_pending` = **OFF**. ✅
+1. `router_node`: questionnaire pending → routes straight to the tool.
+2. `_collect()` → `_validate(...)` → **false** (not an answer).
+3. `_is_clarification(...)` → **true** (a question about the questionnaire).
+4. `_explain()` emits two `chat` bubbles: the user's question + a plain-language
+   rephrase of the questions. **No** `questionnaire_invalid` / re-ask.
+   `questionnaire_pending` stays **ON**. ✅ The user is not trapped.
+
+**Turn 4** — The user fills the slide UI and clicks **Submit**. The frontend
+posts `POST /submit_questionnaire_answers` with
+`[{key: "q1", answer: "Competitors: Starbucks and Blue Tokai."}, ...]`.
+
+1. `_collect()` → `_structured_answers()` recognises the JSON payload.
+2. Answers mapped onto `q1`, `q2`, `q3` **by key** — no `_validate` / `_parse`
+   call, so nothing can be wrongly rejected.
+3. `questionnaire_answer` (numbered summary) + `questionnaire_complete` emitted
+   → `questionnaire_pending` = **OFF**. ✅
+
+*(If the user instead types the answers free-form in the composer,
+`_validate` → `_parse` are used as described in section 6.)*
 
 Now `business_context(messages)` returns the full facts for the chat agent and
-the other tools (SWOT, web search, ...).
+the context-gated tools (SWOT, web search, ...).
 
 ---
 
@@ -432,7 +594,10 @@ the other tools (SWOT, web search, ...).
 The tests that cover all of this live in `worker/tests/test_chat_tools.py`
 (`test_questionnaire_asks_for_idea_when_trigger_phrase`,
 `test_questionnaire_rejects_nonsense_answers`,
-`test_questionnaire_auto_starts_then_collects`). Run them with:
+`test_questionnaire_auto_starts_then_collects`,
+`test_questionnaire_structured_answers_bypass_parsing`,
+`test_context_tools_gated_until_questionnaire_complete`,
+`test_context_tool_runs_after_questionnaire_complete`). Run them with:
 
 ```bash
 cd /home/harish/Code/KapexAI && PYTHONPATH=. .venv/bin/python -m pytest worker/tests/ -q
@@ -447,9 +612,13 @@ cd /home/harish/Code/KapexAI && PYTHONPATH=. .venv/bin/python -m pytest worker/t
 - Two phases (`_ask` / `_collect`) are chosen purely by
   `questionnaire_pending()`, which is flipped by the `questionnaire` /
   `questionnaire_answer` message types.
+- Answers arrive **structured by key** from the slide UI (no LLM), with a
+  free-form fallback that keeps the `_validate` / `_parse` guards.
 - Two LLM-powered guards keep the interview on track: `_is_real_idea`
   (command phrases can't become the idea) and `_validate` (nonsense answers
   can't become context). Both fail safely.
+- The tool is the **context gatekeeper**: `requires_context` tools (SWOT, web
+  research) don't run until `questionnaire_complete` exists.
 - The tool returns **message entries**, and `tool_node` handles persisting +
   streaming them — the tool itself never touches the DB or pub/sub directly
   (except the session-title update in `_ask`).

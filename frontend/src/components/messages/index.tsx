@@ -5,23 +5,25 @@ import { QuestionnaireCompleteCard } from './QuestionnaireCompleteCard'
 import { ResearchCard } from './ResearchCard'
 import { SwotCard } from './SwotCard'
 
-interface MessageComponentProps {
-  message: ChatMessage
+const registry: Record<string, React.ComponentType<any>> = {
+  swot: SwotCard,
+  research: ResearchCard,
+  questionnaire: QuestionnaireCard,
+  questionnaire_complete: QuestionnaireCompleteCard,
+  markdown: MarkdownMessage,
+  chat: MarkdownMessage,
 }
 
-export function renderMessageCard(message: ChatMessage) {
-  switch (message.type) {
-    case 'swot':
-      return <SwotCard message={message} />
-    case 'research':
-      return <ResearchCard message={message} />
-    case 'questionnaire':
-      return <QuestionnaireCard message={message} />
-    case 'questionnaire_complete':
-      return <QuestionnaireCompleteCard message={message} />
-    case 'markdown':
-    case 'chat':
-    default:
-      return <MarkdownMessage message={message} />
-  }
+export type MessageComponentProps = {
+  message: ChatMessage
+  sessionId?: string
+  streaming?: boolean
+  completed?: boolean
+  onSubmitQuestionnaire?: (answers: any[]) => void
+  onClarifyQuestion?: (keys: string[], prompt: string) => void
+}
+
+export function MessageContent(props: MessageComponentProps) {
+  const Component = registry[props.message.type] ?? MarkdownMessage
+  return <Component {...props} />
 }

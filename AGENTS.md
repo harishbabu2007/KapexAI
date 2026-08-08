@@ -59,7 +59,7 @@ Schema models: `User`, `Session`, `Message` (with `Role`, `Agent`, `Status` enum
 - Backend connects Redis in its `lifespan` alongside the DB
 - Supports pub/sub — used by the WebSocket endpoint for real-time streaming
 
-Full docs at `docs/agentic-pipeline.md` (router/tools/message log), `docs/services.md`, and `docs/queue-and-streaming.md`.
+Full docs at `docs/agentic-pipeline.md` (router/tools/message log), `docs/services.md`, `docs/queue-and-streaming.md` (jobs/streaming), and `docs/tab-switching.md` (single-tab lock + state resume).
 
 ## Frontend
 
@@ -85,22 +85,24 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 
 ## Architecture & data flow
 
-1. **Backend** (`backend/main.py`) exposes REST endpoints that create sessions/messages and push jobs to Redis queue `jobs:queue`.
-2. **Worker** (`worker/main.py`) polls `jobs:queue` with `brpop` (5s timeout), then runs the job through a compiled LangGraph graph.
+1. **Backend** (`backend/main.py`) exposes REST endpoints that create sessions/messages and push jobs to Redis queue `jobs:queue`. Every submission also records the in-flight message in Redis (`pending:{session_id}`, 5-min TTL) and flags the session `PENDING`, so any tab can surface it while the worker is still replying.
+2. **Worker** (`worker/main.py`) polls `jobs:queue` with `brpop` (5s timeout), then runs the job through a compiled LangGraph graph. When a job finishes it clears the `pending:{session_id}` key and marks the session `ACTIVE` (or `FAILED` on error).
 3. **Graph** (`worker/agent.py`) is a `StateGraph` with a single `router` node that decides how to handle each user message:
    - `chat` — `chat_agent` (business-consultant persona) replies conversationally; the reply is saved as a `Message` and streamed.
    - `tool` — dispatch to a registered tool (see `worker/tools/registry.py`). Each tool returns message entries with its own JSON shape (`type` + extra fields); `tool_node` persists and streams them.
-   - The **router** sends greetings/small talk to the chat agent (which stays strictly business-focused) and routes a shared business idea to the **questionnaire tool** to build context; while questions are pending, answers are routed back to it automatically.
+   - The **router** sends greetings/small talk to the chat agent (which stays strictly business-focused) and routes a shared business idea to the **questionnaire tool** to build context; "set up / start / build a business" is also routed to the questionnaire so new users get the guided setup instead of an open-ended "what do you need?". While questions are pending, answers are routed back to the questionnaire automatically. The chat agent never repeats an already-asked question and, when there's no business context yet, proactively offers the guided setup.
+   - Tools that need business context (`swot`, `web_search`, marked `requires_context = True` on the `Tool`) are **gated**: they only run after the questionnaire completes (`questionnaire_complete`); before that the router redirects the request to the questionnaire tool so context exists first.
+   - The questionnaire answers are collected by the frontend **slide UI** (one question at a time) and submitted as structured `{key, answer}` pairs via `POST /submit_questionnaire_answers`; the worker maps them into context by key without LLM parsing, but validates each non-empty answer per-question (gibberish is rejected and re-asked, never absorbed). Free-form typed answers fall back to LLM validation/parsing.
    - Every chat/tool turn ends by streaming a `suggestions` event listing available tools (name + example + suggestion phrase) and an `end` event.
-4. **Streaming** — each node publishes to pub/sub channel `stream:{session_id}`; the backend WebSocket endpoint `ws/session/{session_id}` forwards it to the client.
+4. **Streaming** — each node publishes to pub/sub channel `stream:{session_id}`; the backend WebSocket endpoint `ws/session/{session_id}` forwards it to the client. The socket closes right away if no job is in flight for the session and treats a client disconnecting mid-stream as a normal close.
 5. **State** — a **message log** (`messages`) is cached in Redis (`langgraph_state:{session_id}`, 24h TTL) and rebuilt from DB message history (ordered by `created_at`) via `worker/helpers/persistence.py`. Each log entry is `{role, agent, type, content, ...tool-specific fields}`.
-6. **Frontend** — the React app signs in via a Google popup (`POST /auth/google`), then `src/hooks/useChatSession.ts` drives the workspace: sessions come from `GET /get_sessions`, messages from `GET /get_messages`, and streaming from the WebSocket. Sessions can be **renamed** (`POST /rename_session`, updates `business_idea`) or **deleted** (`POST /delete_session`, removes the session + all messages + the Redis `langgraph_state` key) from the sidebar's per-session ⋯ menu.
+6. **Frontend** — the React app signs in via a Google popup (`POST /auth/google`), then `src/hooks/useChatSession.ts` drives the workspace: sessions come from `GET /get_sessions`, messages from `GET /get_messages`, and streaming from the WebSocket. Sessions can be **renamed** (`POST /rename_session`, updates `business_idea`) or **deleted** (`POST /delete_session`, removes the session + all messages + the Redis `langgraph_state` and `pending` keys) from the sidebar's per-session ⋯ menu. A fresh tab that loads a session with an in-flight job (the `pending` field from `GET /get_messages`) shows the pending bubble + typing indicator and connects to the live stream; sending another message is blocked until the current reply finishes. Incoming messages never auto-scroll the chat — the view only anchors to the bottom when the user sends a message or switches sessions.
 
 ## Key modules
 
 | File | Description |
 |---|---|
-| `backend/main.py` | FastAPI app: `/health`, `/waitlist`, `/create_chat_session`, `/push_chat_message`, `/get_sessions`, `/get_messages`, `/rename_session`, `/delete_session`, `ws/session/{session_id}` |
+| `backend/main.py` | FastAPI app: `/health`, `/waitlist`, `/create_chat_session`, `/push_chat_message`, `/submit_questionnaire_answers`, `/get_sessions`, `/get_messages`, `/rename_session`, `/delete_session`, `ws/session/{session_id}`. Tracks in-flight jobs via the `pending:{session_id}` key + `PENDING` status |
 | `backend/utils/jwt_utils.py` | JWT token creation and verification using python-jose (HS256, 7-day expiry) |
 | `backend/middleware/auth.py` | FastAPI `get_current_user` dependency — extracts Bearer token, decodes JWT, fetches user from DB |
 | `backend/routers/auth.py` | Google OAuth endpoints: `/auth/google` (popup ID token), `/auth/google/callback`, `/auth/me` |
@@ -123,7 +125,7 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 | `frontend/src/hooks/useChatSession.ts` | Chat workspace state: sessions, active session, WS streaming, rename/delete |
 | `frontend/src/App.tsx` | Routes: `/` landing, `/chat` (protected), `*` → `/` |
 | `frontend/src/pages/LandingPage.tsx` | Landing hero/CTA + sign-in block |
-| `frontend/src/pages/ChatPage.tsx` | Chat workspace layout (sidebar + messages + composer) |
+| `frontend/src/pages/ChatPage.tsx` | Chat workspace layout (sidebar + messages + composer); scrolls to bottom only on send/session switch, never on incoming content |
 | `frontend/src/components/chat/Sidebar.tsx` | Session list with per-session ⋯ menu (rename inline, delete confirm) |
 | `frontend/src/components/messages/` | Per-tool message card components, keyed by message `type` |
 
