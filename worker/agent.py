@@ -15,12 +15,14 @@ from worker.helpers.messages import (
     append_message,
     business_context,
     format_transcript,
+    inject_business_profile,
     questionnaire_complete,
     questionnaire_pending,
 )
 from worker.helpers.persistence import (
     add_message,
     build_state_from_db,
+    get_business_profile,
     get_session,
     mark_session_active,
     mark_session_failed,
@@ -176,11 +178,21 @@ async def load_state(session_id: str) -> State:
         state.setdefault("messages", [])
         state.setdefault("intent", "")
         state.setdefault("tool", "")
-        return state
-    session = await get_session(session_id)
-    if session is None:
-        raise ValueError(f"Session not found: {session_id}")
-    return await build_state_from_db(session)
+        state.setdefault("user_id", "")
+    else:
+        session = await get_session(session_id)
+        if session is None:
+            raise ValueError(f"Session not found: {session_id}")
+        state = await build_state_from_db(session)
+
+    # Inject the user's business profile into the message log. This is done fresh
+    # on every load (replacing any stale cached entry), so a profile edit shows
+    # up in the very next job — the messages/cache never go stale.
+    row = await get_business_profile(state.get("user_id", ""))
+    profile = row.content if row else {}
+    if isinstance(profile, dict):
+        state["messages"] = inject_business_profile(state["messages"], profile)
+    return state
 
 
 async def save_state(session_id: str, state: State) -> None:

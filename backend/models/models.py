@@ -33,3 +33,12 @@ class RenameSessionRequest(BaseModel):
 
 class DeleteSessionRequest(BaseModel):
     session_id: str
+
+class BusinessProfileRequest(BaseModel):
+    your_name: str = ""
+    industry: str = ""
+    about_you: str = ""
+    business_history: str = ""
+    location: str = ""
+    monthly_income: str = ""
+    monthly_expenditure: str = ""

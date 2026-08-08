@@ -18,7 +18,15 @@ type AuthContextValue = {
   token: string | null
   /** True while the session is being restored from storage / validated. */
   loading: boolean
+  /**
+   * Whether the user has not filled in their business profile yet. `null`
+   * while unknown (during restore). Drives the landing→profile redirect for
+   * fresh signups and un-filed profiles.
+   */
+  profileEmpty: boolean | null
   signInWithGoogle: (credential: string) => Promise<void>
+  /** Marks the business profile as filled after a successful save. */
+  markProfileFilled: () => void
   signOut: () => void
 }
 
@@ -38,6 +46,7 @@ function readStoredSession(): { token: string; user: AuthenticatedUser } | null 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null)
   const [user, setUser] = useState<AuthenticatedUser | null>(null)
+  const [profileEmpty, setProfileEmpty] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -58,6 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localStorage.setItem(USER_KEY, JSON.stringify(fresh))
         setToken(stored.token)
         setUser(fresh)
+        setProfileEmpty(fresh.profile_empty)
       } catch (err) {
         if (cancelled) return
         if (err instanceof ApiError && err.status === 401) {
@@ -66,6 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           localStorage.removeItem(USER_KEY)
           setToken(null)
           setUser(null)
+          setProfileEmpty(null)
         } else {
           // Transient failure (network, backend down) — keep the stored
           // session so a hiccup doesn't log the user out.
@@ -89,6 +100,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(USER_KEY, JSON.stringify(result.user))
     setToken(result.access_token)
     setUser(result.user)
+    setProfileEmpty(result.profile_empty)
+  }, [])
+
+  const markProfileFilled = useCallback(() => {
+    setProfileEmpty(false)
   }, [])
 
   const signOut = useCallback(() => {
@@ -96,11 +112,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(USER_KEY)
     setToken(null)
     setUser(null)
+    setProfileEmpty(null)
   }, [])
 
   const value = useMemo(
-    () => ({ user, token, loading, signInWithGoogle: signInWithGoogleCallback, signOut }),
-    [user, token, loading, signInWithGoogleCallback, signOut],
+    () => ({ user, token, loading, profileEmpty, signInWithGoogle: signInWithGoogleCallback, markProfileFilled, signOut }),
+    [user, token, loading, profileEmpty, signInWithGoogleCallback, markProfileFilled, signOut],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

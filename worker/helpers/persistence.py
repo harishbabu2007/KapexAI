@@ -18,6 +18,12 @@ async def get_session(session_id: str):
     return await db.session.find_unique(where={"id": session_id})
 
 
+async def get_business_profile(user_id: str):
+    """Returns the user's business profile row, or None when the user has no
+    profile (accounts created before the feature shipped)."""
+    return await db.businessprofile.find_unique(where={"userId": user_id})
+
+
 async def get_latest_session(user_id: str):
     return await db.session.find_first(
         where={"userId": user_id},

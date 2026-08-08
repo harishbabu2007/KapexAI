@@ -4,6 +4,22 @@ export type AuthenticatedUser = {
   name: string | null
 }
 
+/**
+ * The user's saved business profile. Every key is optional — a blank (or all
+ * empty) profile means the worker treats the user as having no head-start
+ * context. The `content` column of the `BusinessProfile` table stores exactly
+ * these keys.
+ */
+export type BusinessProfile = {
+  your_name?: string
+  industry?: string
+  about_you?: string
+  business_history?: string
+  location?: string
+  monthly_income?: string
+  monthly_expenditure?: string
+}
+
 export type SessionInfo = {
   id: string
   business_idea: string

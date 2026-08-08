@@ -1,16 +1,15 @@
 import { GoogleLogin } from '@react-oauth/google'
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../lib/auth'
 
 /**
  * "Sign in with Google" popup button. On success the Google ID token is
  * exchanged for a KapexAI JWT via `POST /auth/google` and stored by the
- * AuthProvider.
+ * AuthProvider. Routing after sign-in (profile page for fresh signups, chat
+ * otherwise) is handled by the landing route, not by this button.
  */
 export function GoogleSignInButton({ width = 260 }: { width?: number }) {
   const { signInWithGoogle } = useAuth()
-  const navigate = useNavigate()
   const [error, setError] = useState('')
 
   function handleCredential(credential?: string) {
@@ -19,11 +18,9 @@ export function GoogleSignInButton({ width = 260 }: { width?: number }) {
       return
     }
     setError('')
-    signInWithGoogle(credential)
-      .then(() => navigate('/chat'))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : 'Google sign-in could not be completed.'),
-      )
+    signInWithGoogle(credential).catch((err) =>
+      setError(err instanceof Error ? err.message : 'Google sign-in could not be completed.'),
+    )
   }
 
   return (

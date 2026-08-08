@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
+from prisma import Json
+
 from db_service import connect_db, disconnect_db, db
 from redis_service import connect_redis, disconnect_redis, redis
 
@@ -24,8 +26,14 @@ from .models.models import (
     SubmitQuestionnaireClarificationRequest,
     RenameSessionRequest,
     DeleteSessionRequest,
+    BusinessProfileRequest,
 )
-from .utils.db_utils import get_session, get_all_sessions
+from .utils.db_utils import (
+    business_profile_is_empty,
+    ensure_business_profile,
+    get_session,
+    get_all_sessions,
+)
 from .routers import auth
 from .middleware.auth import get_current_user
 
@@ -284,6 +292,33 @@ async def delete_session(user_data: DeleteSessionRequest, current_user = Depends
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={"message": "success", "session_id": session.id},
+    )
+
+
+@app.get("/get_business_profile")
+async def get_business_profile(current_user = Depends(get_current_user)):
+    """Returns the current user's business profile content (an object with the
+    standard profile keys; empty values when nothing has been filled in yet)."""
+    row = await ensure_business_profile(current_user.id)
+    content = row.content
+    if not isinstance(content, dict):
+        content = {}
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"data": content})
+
+
+@app.post("/update_business_profile")
+async def update_business_profile(profile_data: BusinessProfileRequest, current_user = Depends(get_current_user)):
+    """Upserts the current user's business profile. Each field is optional; empty
+    strings are stored as-is so a user can also clear a field."""
+    await ensure_business_profile(current_user.id)
+    content = {k: v for k, v in profile_data.model_dump().items() if v is not None}
+    updated = await db.businessprofile.update(
+        where={"userId": current_user.id},
+        data={"content": Json(content)},
+    )
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": "success", "data": updated.content},
     )
 
 

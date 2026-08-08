@@ -9,6 +9,7 @@ from jose import jwt, JWTError
 
 from db_service import db
 from backend.models.models import GoogleTokenRequest
+from backend.utils.db_utils import business_profile_is_empty, ensure_business_profile
 from backend.utils.jwt_utils import create_token, decode_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -102,6 +103,11 @@ async def google_oauth_token(request: GoogleTokenRequest):
     if not user:
         user = await db.user.create(data={"email": email, "name": payload.get("name")})
 
+    # Every user gets a (possibly empty) business profile row so the worker can
+    # pull context from it without special-casing missing rows.
+    await ensure_business_profile(user.id)
+    profile_empty = await business_profile_is_empty(user.id)
+
     # Create JWT token
     jwt_token = create_token({"user_id": user.id, "email": user.email})
 
@@ -112,6 +118,7 @@ async def google_oauth_token(request: GoogleTokenRequest):
             "email": user.email,
             "name": user.name,
         },
+        "profile_empty": profile_empty,
     }
 
 
@@ -177,6 +184,8 @@ async def google_oauth_callback(code: str):
     if not user:
         user = await db.user.create(data={"email": email, "name": name})
 
+    await ensure_business_profile(user.id)
+
     # Create JWT token
     jwt_token = create_token({"user_id": user.id, "email": user.email})
 
@@ -220,8 +229,11 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    profile_empty = await business_profile_is_empty(user.id)
+
     return {
         "user_id": user.id,
         "email": user.email,
         "name": user.name,
+        "profile_empty": profile_empty,
     }

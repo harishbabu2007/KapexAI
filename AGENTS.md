@@ -47,7 +47,7 @@ Frontend deps go in `frontend/package.json` via `npm install <pkg>`.
 - After editing `schema.prisma`, run `make generate` then `make migrate`
 - `.prisma/` is gitignored (generated Prisma client)
 
-Schema models: `User`, `Session`, `Message` (with `Role`, `Agent`, `Status` enums). The `Agent` enum tracks which agent produced a message (`QUESTIONNAIRE`, `RESEARCH`, `REPORT`, `GUARDRAIL`, `CHAT`, `TOOL`).
+Schema models: `User`, `Session`, `Message` (with `Role`, `Agent`, `Status` enums), `BusinessProfile` (`userId` unique, `content` Json, one-to-one with `User`). The `Agent` enum tracks which agent produced a message (`QUESTIONNAIRE`, `RESEARCH`, `REPORT`, `GUARDRAIL`, `CHAT`, `TOOL`).
 
 ### `redis-service` — Redis Cloud (redis-py)
 
@@ -65,9 +65,9 @@ Full docs at `docs/agentic-pipeline.md` (router/tools/message log), `docs/servic
 
 Vite + React (TypeScript), deps managed via `frontend/package.json` (`npm install`). Key libs: `react-router-dom` (routing), `@react-oauth/google` (Google popup sign-in), `react-markdown` + `remark-gfm` (assistant messages).
 
-- Routes (`src/App.tsx`): `/` (landing), `/chat` (protected), `*` → `/`
-- Auth: `src/lib/auth.tsx` AuthProvider stores the JWT + user in `localStorage` (persists across tabs); restores/validates on load via `GET /auth/me` and only drops the session on a 401
-- API client: `src/lib/api.ts` (typed `fetch` wrapper, `ApiError` with `.status`, `wsUrl()` for the stream socket)
+- Routes (`src/App.tsx`): `/` (landing), `/chat` (protected), `/business-profile` (protected, first-fill profile), `*` → `/`
+- Auth: `src/lib/auth.tsx` AuthProvider stores the JWT + user in `localStorage` (persists across tabs); restores/validates on load via `GET /auth/me` and only drops the session on a 401. Tracks `profileEmpty` so authenticated users are redirected past the landing page: empty profile → `/business-profile`, filled → `/chat` (`HomeRedirect` in `App.tsx`)
+- API client: `src/lib/api.ts` (typed `fetch` wrapper, `ApiError` with `.status`, `wsUrl()` for the stream socket, `getBusinessProfile`/`updateBusinessProfile` for the profile page)
 - Chat state: `src/hooks/useChatSession.ts` (sessions list, active session, streaming via WebSocket, rename/delete handlers)
 - Styling: `src/styles/global.css` (landing) + `src/styles/chat.css` (workspace)
 - Env: `VITE_API_BASE_URL` (default `http://localhost:8000`), `VITE_GOOGLE_CLIENT_ID` (in `frontend/.env.local`)
@@ -97,36 +97,38 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 4. **Streaming** — each node publishes to pub/sub channel `stream:{session_id}`; the backend WebSocket endpoint `ws/session/{session_id}` forwards it to the client. The socket closes right away if no job is in flight for the session and treats a client disconnecting mid-stream as a normal close.
 5. **State** — a **message log** (`messages`) is cached in Redis (`langgraph_state:{session_id}`, 24h TTL) and rebuilt from DB message history (ordered by `created_at`) via `worker/helpers/persistence.py`. Each log entry is `{role, agent, type, content, ...tool-specific fields}`.
 6. **Frontend** — the React app signs in via a Google popup (`POST /auth/google`), then `src/hooks/useChatSession.ts` drives the workspace: sessions come from `GET /get_sessions`, messages from `GET /get_messages`, and streaming from the WebSocket. Sessions can be **renamed** (`POST /rename_session`, updates `business_idea`) or **deleted** (`POST /delete_session`, removes the session + all messages + the Redis `langgraph_state` and `pending` keys) from the sidebar's per-session ⋯ menu. A fresh tab that loads a session with an in-flight job (the `pending` field from `GET /get_messages`) shows the pending bubble + typing indicator and connects to the live stream; sending another message is blocked until the current reply finishes. Incoming messages never auto-scroll the chat — the view only anchors to the bottom when the user sends a message or switches sessions.
+7. **Business profile** — each `User` has one `BusinessProfile` row (created lazily by `ensure_business_profile` on signup). The frontend `/business-profile` page collects seven fields (`your_name`, `industry`, `about_you`, `business_history`, `location`, `monthly_income`, `monthly_expenditure`) and saves them via `POST /update_business_profile`; `GET /get_business_profile` returns the raw `content` dict. On every worker job, `load_state` refetches the profile and injects a `business_profile` message-log entry via `inject_business_profile` (replaces any stale cached entry, leaving the log empty if the profile is blank), so tools/the chat agent always read fresh values. After signup and on `/auth/me`, the backend returns `profile_empty`; `HomeRedirect` sends users with an empty profile to `/business-profile` instead of `/chat`.
 
 ## Key modules
 
 | File | Description |
 |---|---|
-| `backend/main.py` | FastAPI app: `/health`, `/waitlist`, `/create_chat_session`, `/push_chat_message`, `/submit_questionnaire_answers`, `/get_sessions`, `/get_messages`, `/rename_session`, `/delete_session`, `ws/session/{session_id}`. Tracks in-flight jobs via the `pending:{session_id}` key + `PENDING` status |
+| `backend/main.py` | FastAPI app: `/health`, `/waitlist`, `/create_chat_session`, `/push_chat_message`, `/submit_questionnaire_answers`, `/get_sessions`, `/get_messages`, `/rename_session`, `/delete_session`, `/get_business_profile`, `/update_business_profile`, `ws/session/{session_id}`. Tracks in-flight jobs via the `pending:{session_id}` key + `PENDING` status |
 | `backend/utils/jwt_utils.py` | JWT token creation and verification using python-jose (HS256, 7-day expiry) |
 | `backend/middleware/auth.py` | FastAPI `get_current_user` dependency — extracts Bearer token, decodes JWT, fetches user from DB |
-| `backend/routers/auth.py` | Google OAuth endpoints: `/auth/google` (popup ID token), `/auth/google/callback`, `/auth/me` |
-| `backend/utils/db_utils.py` | Backend-side Prisma helpers (`get_user`, `get_session`, `get_all_sessions`) |
-| `backend/models/models.py` | Pydantic request bodies (waitlist, chat session/message, rename/delete session) |
+| `backend/routers/auth.py` | Google OAuth endpoints: `/auth/google` (popup ID token), `/auth/google/callback`, `/auth/me`. Ensures a `BusinessProfile` row on signup and returns `profile_empty` |
+| `backend/utils/db_utils.py` | Backend-side Prisma helpers (`get_user`, `get_session`, `get_all_sessions`, `ensure_business_profile`, `business_profile_is_empty`) |
+| `backend/models/models.py` | Pydantic request bodies (waitlist, chat session/message, rename/delete session, business profile) |
 | `worker/main.py` | Async worker loop; polls Redis queue and dispatches jobs |
-| `worker/agent.py` | LangGraph graph definition, state load/save, `process_job` |
+| `worker/agent.py` | LangGraph graph definition, state load/save, `process_job`; `load_state` injects the user's `business_profile` into the message log |
 | `worker/agents/` | `router_agent.py` (intent classifier), `chat_agent.py` (consultant chat) |
-| `worker/helpers/persistence.py` | Prisma helpers + DB message-log rebuild for the worker |
-| `worker/helpers/messages.py` | Message-log helpers (transcript, questionnaire state, business context) |
+| `worker/helpers/persistence.py` | Prisma helpers (`get_business_profile`) + DB message-log rebuild for the worker |
+| `worker/helpers/messages.py` | Message-log helpers (transcript, questionnaire state, business profile injection/context) |
 | `worker/helpers/events.py` | Pub/sub stream publishing helpers |
 | `worker/tools/` | Plug-and-play tools: `base.py`, `registry.py`, `questionnaire_tool.py`, `swot_tool.py`, `web_search_tool.py` |
 | `worker/prompts/` | LLM prompt templates per agent/tool |
 | `worker/tools/tavily_search.py` | Tavily search tool used by `web_search_tool` |
 | `worker/tests/` | `test_chat_tools.py` — queue/pub-sub, chat, tool, questionnaire, state-rebuild tests |
-| `backend/tests/` | `test_main.py`, `test_jwt_utils.py`, `test_auth.py`, `test_middleware.py` |
-| `frontend/src/lib/api.ts` | Typed HTTP client (`request`, `ApiError`, `wsUrl`, auth/session/waitlist calls) |
-| `frontend/src/lib/auth.tsx` | AuthProvider — Google sign-in, `localStorage` session persistence, 401-only clearing |
-| `frontend/src/lib/types.ts` | Shared TS types (`SessionInfo`, `ChatMessage`, `StreamFrame`, `ToolInfo`) |
+| `backend/tests/` | `test_main.py`, `test_jwt_utils.py`, `test_auth.py`, `test_middleware.py`, `test_db_utils.py` |
+| `frontend/src/lib/api.ts` | Typed HTTP client (`request`, `ApiError`, `wsUrl`, auth/session/waitlist/profile calls) |
+| `frontend/src/lib/auth.tsx` | AuthProvider — Google sign-in, `localStorage` session persistence, 401-only clearing, `profileEmpty` state + `markProfileFilled` |
+| `frontend/src/lib/types.ts` | Shared TS types (`SessionInfo`, `ChatMessage`, `StreamFrame`, `ToolInfo`, `BusinessProfile`) |
 | `frontend/src/hooks/useChatSession.ts` | Chat workspace state: sessions, active session, WS streaming, rename/delete |
-| `frontend/src/App.tsx` | Routes: `/` landing, `/chat` (protected), `*` → `/` |
+| `frontend/src/App.tsx` | Routes: `/` landing, `/chat` (protected), `/business-profile` (protected), `*` → `/`; `HomeRedirect` sends profile-empty users to `/business-profile` |
 | `frontend/src/pages/LandingPage.tsx` | Landing hero/CTA + sign-in block |
 | `frontend/src/pages/ChatPage.tsx` | Chat workspace layout (sidebar + messages + composer); scrolls to bottom only on send/session switch, never on incoming content |
-| `frontend/src/components/chat/Sidebar.tsx` | Session list with per-session ⋯ menu (rename inline, delete confirm) |
+| `frontend/src/pages/BusinessProfilePage.tsx` | First-fill profile page — collects the seven profile fields, Save → `/chat`, "Skip for now" |
+| `frontend/src/components/chat/Sidebar.tsx` | Session list with per-session ⋯ menu (rename inline, delete confirm) + "Business profile" button |
 | `frontend/src/components/messages/` | Per-tool message card components, keyed by message `type` |
 
 Before running either service, ensure the Prisma client is generated: `make generate`.

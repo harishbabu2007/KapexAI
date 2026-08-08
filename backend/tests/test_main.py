@@ -1035,6 +1035,144 @@ class TestDeleteSession:
         assert response.status_code == 401
 
 
+# ── Business Profile ─────────────────────────────────────────
+
+class TestGetBusinessProfile:
+    async def test_returns_profile_content(self, client):
+        mock_user = MagicMock(id="user-123", email="test@test.com")
+
+        async def mock_get_current_user(authorization: str = None):
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = mock_get_current_user
+
+        profile_row = MagicMock(
+            content={"your_name": "Cafe Pune", "location": "Pune"}
+        )
+        mock_utils_db = MagicMock()
+        mock_utils_db.businessprofile.find_unique = AsyncMock(return_value=profile_row)
+
+        try:
+            with (
+                patch.object(jwt_utils, "JWT_SECRET", "test-secret"),
+                patch("backend.main.db", MagicMock()),
+                patch("backend.utils.db_utils.db", mock_utils_db),
+            ):
+                from backend.utils.jwt_utils import create_token
+                token = create_token({"user_id": "user-123", "email": "test@test.com"})
+
+                async with client as c:
+                    response = await c.get(
+                        "/get_business_profile",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+            assert response.status_code == 200
+            assert response.json()["data"] == {
+                "your_name": "Cafe Pune",
+                "location": "Pune",
+            }
+        finally:
+            app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_content_when_no_profile(self, client):
+        mock_user = MagicMock(id="user-123", email="test@test.com")
+
+        async def mock_get_current_user(authorization: str = None):
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = mock_get_current_user
+
+        created = MagicMock(content={})
+        mock_utils_db = MagicMock()
+        mock_utils_db.businessprofile.find_unique = AsyncMock(return_value=None)
+        mock_utils_db.businessprofile.create = AsyncMock(return_value=created)
+
+        with (
+            patch.object(jwt_utils, "JWT_SECRET", "test-secret"),
+            patch("backend.main.db", MagicMock()),
+            patch("backend.utils.db_utils.db", mock_utils_db),
+        ):
+            from backend.utils.jwt_utils import create_token
+            token = create_token({"user_id": "user-123", "email": "test@test.com"})
+
+            async with client as c:
+                response = await c.get(
+                    "/get_business_profile",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+        assert response.status_code == 200
+        assert response.json()["data"] == {}
+        mock_utils_db.businessprofile.create.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_401_when_token_missing(self, client):
+        async with client as c:
+            response = await c.get("/get_business_profile")
+
+        assert response.status_code == 401
+
+
+class TestUpdateBusinessProfile:
+    @pytest.mark.asyncio
+    async def test_updates_and_returns_profile(self, client):
+        mock_user = MagicMock(id="user-123", email="test@test.com")
+
+        async def mock_get_current_user(authorization: str = None):
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = mock_get_current_user
+
+        profile_row = Mock(content={})
+        mock_utils_db = MagicMock()
+        mock_utils_db.businessprofile.find_unique = AsyncMock(return_value=profile_row)
+
+        saved_content = {
+            "your_name": "Cafe Pune",
+            "industry": "F&B",
+            "location": "Pune",
+        }
+        mock_db = MagicMock()
+        mock_db.businessprofile.update = AsyncMock(
+            return_value=Mock(content=saved_content)
+        )
+
+        try:
+            with (
+                patch.object(jwt_utils, "JWT_SECRET", "test-secret"),
+                patch("backend.main.db", mock_db),
+                patch("backend.utils.db_utils.db", mock_utils_db),
+            ):
+                from backend.utils.jwt_utils import create_token
+                token = create_token(
+                    {"user_id": "user-123", "email": "test@test.com"}
+                )
+
+                async with client as c:
+                    response = await c.post(
+                        "/update_business_profile",
+                        json=saved_content,
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+            assert response.status_code == 200
+            assert response.json()["message"] == "success"
+            assert response.json()["data"] == saved_content
+        finally:
+            app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_returns_401_when_token_missing(self, client):
+        async with client as c:
+            response = await c.post(
+                "/update_business_profile", json={"your_name": "Cafe"}
+            )
+
+        assert response.status_code == 401
+
+
 # ── WebSocket Stream ─────────────────────────────────────────
 
 class TestWebSocketStream:

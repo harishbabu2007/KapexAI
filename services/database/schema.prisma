@@ -16,6 +16,18 @@ model User {
   created_at DateTime @default(now())
 
   sessions Session[]
+  profile  BusinessProfile?
+}
+
+model BusinessProfile {
+  id     String @id @default(uuid())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String @unique
+
+  content Json
+
+  updated_at DateTime @updatedAt
 }
 
 model Session {

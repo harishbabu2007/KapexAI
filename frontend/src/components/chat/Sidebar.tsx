@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import type { AuthenticatedUser, SessionInfo } from '../../lib/types'
 
 type SidebarProps = {
@@ -45,6 +46,7 @@ export function Sidebar({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draftName, setDraftName] = useState('')
   const cancelEditRef = useRef(false)
+  const navigate = useNavigate()
 
   const closeMenu = () => {
     setMenu(null)
@@ -167,9 +169,21 @@ export function Sidebar({
               <span className="user-email">{user?.email}</span>
             </span>
           </div>
-          <button type="button" className="signout-btn" onClick={onSignOut}>
-            Log out
-          </button>
+          <div className="sidebar-footer-actions">
+            <button
+              type="button"
+              className="profile-link-btn"
+              onClick={() => {
+                onClose?.()
+                navigate('/business-profile')
+              }}
+            >
+              Business profile
+            </button>
+            <button type="button" className="signout-btn" onClick={onSignOut}>
+              Log out
+            </button>
+          </div>
         </div>
       </aside>
 

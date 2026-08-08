@@ -1,4 +1,11 @@
-import type { AuthenticatedUser, ChatMessage, PendingMessage, QuestionnaireAnswer, SessionInfo } from './types'
+import type {
+  AuthenticatedUser,
+  BusinessProfile,
+  ChatMessage,
+  PendingMessage,
+  QuestionnaireAnswer,
+  SessionInfo,
+} from './types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
@@ -47,6 +54,8 @@ export function wsUrl(sessionId: string): string {
 export type GoogleSignInResponse = {
   access_token: string
   user: AuthenticatedUser
+  /** True when the user has not saved any business profile fields yet. */
+  profile_empty: boolean
 }
 
 export function signInWithGoogle(credential: string): Promise<GoogleSignInResponse> {
@@ -60,12 +69,15 @@ type MeResponse = {
   user_id: string
   email: string
   name: string | null
+  profile_empty: boolean
 }
 
+export type ProfileMe = AuthenticatedUser & { profile_empty: boolean }
+
 /** Fetches the current user from the backend; throws ApiError(401) when the token is invalid. */
-export async function getMe(token: string): Promise<AuthenticatedUser> {
+export async function getMe(token: string): Promise<ProfileMe> {
   const me = await request<MeResponse>('/auth/me', { token })
-  return { id: me.user_id, email: me.email, name: me.name }
+  return { id: me.user_id, email: me.email, name: me.name, profile_empty: me.profile_empty }
 }
 
 // ── Sessions ─────────────────────────────────────────────────
@@ -161,6 +173,24 @@ export function deleteSession(
     body: { session_id: sessionId },
     token,
   })
+}
+
+// ── Business Profile ─────────────────────────────────────────
+
+export function getBusinessProfile(
+  token: string,
+): Promise<{ data: BusinessProfile }> {
+  return request<{ data: BusinessProfile }>('/get_business_profile', { token })
+}
+
+export function updateBusinessProfile(
+  token: string,
+  profile: BusinessProfile,
+): Promise<{ message: string; data: BusinessProfile }> {
+  return request<{ message: string; data: BusinessProfile }>(
+    '/update_business_profile',
+    { method: 'POST', body: profile, token },
+  )
 }
 
 // ── Waitlist ─────────────────────────────────────────────────

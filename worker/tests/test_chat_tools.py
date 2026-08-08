@@ -12,7 +12,13 @@ from redis_service import connect_redis, disconnect_redis, redis
 from worker.agent import build_graph, load_state, process_job
 from worker.agents.chat_agent import ChatAgent
 from worker.agents.router_agent import RouterAgent
-from worker.helpers.messages import business_context, questionnaire_pending
+from worker.helpers.messages import (
+    business_context,
+    business_profile,
+    format_transcript,
+    inject_business_profile,
+    questionnaire_pending,
+)
 from worker.helpers.persistence import add_message, build_state_from_db
 from worker.tools.questionnaire_tool import QuestionnaireTool
 from worker.tools.swot_tool import SwotTool
@@ -73,6 +79,20 @@ async def _make_session():
     user = await db.user.create(data={"email": TEST_EMAIL, "name": "Test User"})
     session = await db.session.create(
         data={"userId": user.id, "business_idea": TEST_IDEA}
+    )
+    return session
+
+
+async def _make_profile_session():
+    """Creates a user that has filled in part of their business profile."""
+    from prisma import Json
+
+    session = await _make_session()
+    await db.businessprofile.create(
+        data={
+            "userId": session.userId,
+            "content": Json({"your_name": "Cafe Pune", "location": "Pune"}),
+        }
     )
     return session
 
@@ -1176,6 +1196,127 @@ def test_build_state_from_db_is_order_aware():
                 "research",
                 "questionnaire_start",
             ]
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_inject_business_profile_helpers():
+    messages = [
+        {"role": "USER", "type": "chat", "content": "hi"},
+        {"role": "ASSISTANT", "type": "chat", "content": "hello"},
+    ]
+    profile = {"your_name": "Cafe Pune", "location": "Pune"}
+
+    injected = inject_business_profile(messages, profile)
+    assert msg_types(injected) == ["business_profile", "chat", "chat"]
+    assert business_profile(injected) == profile
+    # Profile is surfaced in the transcript and merged into the context.
+    assert "Cafe Pune" in format_transcript(injected)
+    assert business_context(injected)["business_profile"] == profile
+
+    # Missing or all-blank profile → messages are left untouched.
+    assert inject_business_profile(messages, {}) == messages
+    assert inject_business_profile(messages, {"industry": "   "}) == messages
+
+    # Re-injecting replaces the stale entry instead of duplicating it.
+    refreshed = inject_business_profile(injected, {"location": "Mumbai"})
+    assert msg_types(refreshed) == ["business_profile", "chat", "chat"]
+    assert business_profile(refreshed) == {"location": "Mumbai"}
+
+
+def msg_types(messages):
+    return [m["type"] for m in messages]
+
+
+def test_business_profile_injected_into_state_and_context(monkeypatch):
+    """The user's business profile is injected into the message log on load, so
+    `business_context` and the transcript include it without changing tools."""
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "chat", "tool": None}
+
+    async def fake_chat(self, user_input, transcript, context, tools):
+        assert "Cafe Pune" in transcript
+        assert context["business_profile"]["location"] == "Pune"
+        return "Thanks!"
+
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+    monkeypatch.setattr(ChatAgent, "run", fake_chat)
+
+    async def scenario():
+        session = await _make_profile_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            # Seed a completed questionnaire so suggestions are streamed too.
+            await add_message(sid, "ASSISTANT", "TOOL",
+                              {"type": "questionnaire_complete", "content": "done",
+                               "context": {"business_about": TEST_IDEA}})
+            result = await process_job({"session_id": sid, "user_input": "hi"}, graph)
+            await _collect(ps, 3)
+
+            types = [m["type"] for m in result["messages"]]
+            assert types == ["business_profile", "questionnaire_complete", "chat", "chat"]
+
+            ctx = business_context(result["messages"])
+            assert ctx["business_profile"]["your_name"] == "Cafe Pune"
+            # The worker never persisted the profile as a real message.
+            msgs = await db.message.find_many(where={"sessionId": sid})
+            assert all((m.content or {}).get("type") != "business_profile" for m in msgs)
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_business_profile_updates_reflect_on_next_job(monkeypatch):
+    """Because the profile is injected fresh on every load (replacing the cached
+    entry), editing the profile is picked up by the very next job."""
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "chat", "tool": None}
+
+    async def fake_chat(self, user_input, transcript, context, tools):
+        return "ok"
+
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+    monkeypatch.setattr(ChatAgent, "run", fake_chat)
+
+    async def scenario():
+        from prisma import Json
+
+        session = await _make_profile_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            await process_job({"session_id": sid, "user_input": "hi"}, graph)
+            await _collect(ps, 2)
+
+            await db.businessprofile.update(
+                where={"userId": session.userId},
+                data={
+                    "content": Json(
+                        {"your_name": "Cafe Mumbai", "location": "Mumbai"}
+                    )
+                },
+            )
+
+            result = await process_job(
+                {"session_id": sid, "user_input": "hi again"}, graph
+            )
+            await _collect(ps, 2)
+
+            profile = business_profile(result["messages"])
+            assert profile["your_name"] == "Cafe Mumbai"
+            assert profile["location"] == "Mumbai"
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
         finally:
             await _cleanup(sid)
 
