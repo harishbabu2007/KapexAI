@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createSession,
   deleteSession as apiDeleteSession,
@@ -6,10 +6,18 @@ import {
   getSessions,
   pushMessage,
   renameSession as apiRenameSession,
+  submitQuestionnaireAnswers as apiSubmitQuestionnaireAnswers,
+  submitQuestionnaireClarification as apiSubmitQuestionnaireClarification,
   wsUrl,
 } from '../lib/api'
 import { useAuth } from '../lib/auth'
-import type { ChatMessage, SessionInfo, StreamFrame, ToolInfo } from '../lib/types'
+import type {
+  ChatMessage,
+  QuestionnaireAnswer,
+  SessionInfo,
+  StreamFrame,
+  ToolInfo,
+} from '../lib/types'
 
 type ChatSessionState = {
   sessions: SessionInfo[]
@@ -18,6 +26,7 @@ type ChatSessionState = {
   suggestions: ToolInfo[]
   streaming: boolean
   sending: boolean
+  questionnairePending: boolean
   loadingSessions: boolean
   loadingMessages: boolean
   error: string | null
@@ -26,6 +35,8 @@ type ChatSessionState = {
   renameSession: (id: string, name: string) => Promise<void>
   deleteSession: (id: string) => Promise<void>
   sendMessage: (text: string) => Promise<void>
+  submitQuestionnaireAnswers: (answers: QuestionnaireAnswer[]) => Promise<void>
+  clarifyQuestion: (keys: string[], prompt: string) => Promise<void>
   startNewChat: () => void
 }
 
@@ -43,6 +54,23 @@ export function useChatSession(): ChatSessionState {
   const [error, setError] = useState<string | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
+  const sendingRef = useRef(false)
+
+  // The questionnaire deck is still awaiting answers when the latest
+  // questionnaire-related message is a `questionnaire` (asked or re-asked) with
+  // no `questionnaire_answer` / `questionnaire_complete` after it.
+  const questionnairePending = useMemo(() => {
+    let pending = false
+    for (const msg of messages) {
+      if (msg.type === 'questionnaire') pending = true
+      else if (
+        msg.type === 'questionnaire_answer' ||
+        msg.type === 'questionnaire_complete'
+      )
+        pending = false
+    }
+    return pending
+  }, [messages])
 
   useEffect(() => () => wsRef.current?.close(), [])
 
@@ -70,6 +98,8 @@ export function useChatSession(): ChatSessionState {
 
   const streamSession = useCallback(
     (sessionId: string) => {
+      // Drop any previous socket so overlapping streams can't double-append.
+      closeStream(wsRef.current)
       setStreaming(true)
       setSuggestions([])
       setError(null)
@@ -137,8 +167,24 @@ export function useChatSession(): ChatSessionState {
       setSuggestions([])
       setError(null)
       try {
-        const { data } = await getMessages(token, sessionId)
-        setMessages(data)
+        const { data, pending } = await getMessages(token, sessionId)
+        if (pending) {
+          // The worker is still replying to this session (e.g. from another
+          // tab). Show the in-flight message optimistically and connect to the
+          // live stream so the result arrives in real time.
+          setMessages([
+            ...data,
+            {
+              role: 'USER',
+              type: pending.type ?? 'chat',
+              content: pending.content,
+              pending: true,
+            } as ChatMessage,
+          ])
+          streamSession(sessionId)
+        } else {
+          setMessages(data)
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not load messages')
         setMessages([])
@@ -146,7 +192,7 @@ export function useChatSession(): ChatSessionState {
         setLoadingMessages(false)
       }
     },
-    [token],
+    [token, streamSession],
   )
 
   const selectSession = useCallback(
@@ -255,6 +301,64 @@ export function useChatSession(): ChatSessionState {
     [activeSessionId, token, streaming, sending, refreshSessions, streamSession],
   )
 
+  const submitQuestionnaireAnswers = useCallback(
+    async (answers: QuestionnaireAnswer[]) => {
+      if (!token || !activeSessionId || streaming || sending) return
+      if (sendingRef.current) return
+      sendingRef.current = true
+      setSending(true)
+      setError(null)
+      // Optimistically echo the answers (mirrors the worker's `_format_answers`).
+      const content = answers
+        .map((a, i) => `${i + 1}) ${a.answer || 'Skipped'}`)
+        .join('\n')
+      setMessages((prev) => [
+        ...prev,
+        { role: 'USER', type: 'questionnaire_answer', content },
+      ])
+      try {
+        await apiSubmitQuestionnaireAnswers(token, activeSessionId, answers)
+        streamSession(activeSessionId)
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : 'Could not submit the questionnaire',
+        )
+      } finally {
+        sendingRef.current = false
+        setSending(false)
+      }
+    },
+    [activeSessionId, token, streaming, sending, streamSession],
+  )
+
+  const clarifyQuestion = useCallback(
+    async (keys: string[], prompt: string) => {
+      if (!token || !activeSessionId || streaming || sending) return
+      if (sendingRef.current) return
+      sendingRef.current = true
+      setSending(true)
+      setError(null)
+      setMessages((prev) => [
+        ...prev,
+        { role: 'USER', type: 'chat', content: prompt },
+      ])
+      try {
+        await apiSubmitQuestionnaireClarification(token, activeSessionId, keys)
+        streamSession(activeSessionId)
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'Could not ask for a simpler explanation',
+        )
+      } finally {
+        sendingRef.current = false
+        setSending(false)
+      }
+    },
+    [activeSessionId, token, streaming, sending, streamSession],
+  )
+
   return {
     sessions,
     activeSessionId,
@@ -262,6 +366,7 @@ export function useChatSession(): ChatSessionState {
     suggestions,
     streaming,
     sending,
+    questionnairePending,
     loadingSessions,
     loadingMessages,
     error,
@@ -270,6 +375,8 @@ export function useChatSession(): ChatSessionState {
     renameSession,
     deleteSession,
     sendMessage,
+    submitQuestionnaireAnswers,
+    clarifyQuestion,
     startNewChat,
   }
 }

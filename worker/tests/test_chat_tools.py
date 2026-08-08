@@ -2,9 +2,11 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from db_service import connect_db, db, disconnect_db
+from langchain_core.runnables import RunnableLambda
 from redis_service import connect_redis, disconnect_redis, redis
 
 from worker.agent import build_graph, load_state, process_job
@@ -13,6 +15,7 @@ from worker.agents.router_agent import RouterAgent
 from worker.helpers.messages import business_context, questionnaire_pending
 from worker.helpers.persistence import add_message, build_state_from_db
 from worker.tools.questionnaire_tool import QuestionnaireTool
+from worker.tools.swot_tool import SwotTool
 from worker.tools.web_search_tool import WebSearchTool
 
 TEST_EMAIL = "chat-tools-test@example.com"
@@ -101,6 +104,8 @@ def test_redis_queue_and_pubsub():
 
 
 def test_chat_flow_persists_and_streams(monkeypatch):
+    """Chat replies are persisted and streamed, and once the questionnaire is
+    completed the turn ends with a `suggestions` event listing the tools."""
     async def fake_classify(self, user_input, messages, tools):
         return {"intent": "chat", "tool": None}
 
@@ -114,6 +119,10 @@ def test_chat_flow_persists_and_streams(monkeypatch):
         session = await _make_session()
         sid = session.id
         await add_message(sid, "USER", "CHAT", {"type": "chat", "content": "seed"})
+        # Questionnaire completed → suggestions are streamed after this turn.
+        await add_message(sid, "ASSISTANT", "TOOL",
+                          {"type": "questionnaire_complete", "content": "done",
+                           "context": {"business_about": TEST_IDEA}})
         graph = build_graph()
         ps = await _subscribe(sid)
         try:
@@ -121,7 +130,7 @@ def test_chat_flow_persists_and_streams(monkeypatch):
             events = await _collect(ps, 3)
 
             types = [m["type"] for m in result["messages"]]
-            assert types == ["chat", "chat", "chat"]
+            assert types == ["chat", "questionnaire_complete", "chat", "chat"]
 
             event_types = [e["type"] for e in events]
             assert event_types == ["chat", "suggestions", "end"]
@@ -133,8 +142,8 @@ def test_chat_flow_persists_and_streams(monkeypatch):
             }
 
             msgs = await db.message.find_many(where={"sessionId": sid})
-            assert sorted(m.agent for m in msgs) == ["CHAT", "CHAT", "CHAT"]
-            assert all(m.role == "USER" for m in msgs[:2])
+            assert sorted(m.agent for m in msgs) == ["CHAT", "CHAT", "CHAT", "TOOL"]
+            assert [m.role for m in msgs[:2]] == ["USER", "ASSISTANT"]
 
             await ps.unsubscribe(f"stream:{sid}")
             await ps.close()
@@ -145,6 +154,8 @@ def test_chat_flow_persists_and_streams(monkeypatch):
 
 
 def test_first_message_greeting_goes_to_chat(monkeypatch):
+    """A greeting on a fresh session (no questionnaire yet) goes to the chat
+    agent. Suggestions are NOT streamed until the questionnaire is answered."""
     async def fake_classify(self, user_input, messages, tools):
         return {"intent": "chat", "tool": None}
 
@@ -161,7 +172,7 @@ def test_first_message_greeting_goes_to_chat(monkeypatch):
         ps = await _subscribe(sid)
         try:
             result = await process_job({"session_id": sid, "user_input": "hi"}, graph)
-            events = await _collect(ps, 3)
+            events = await _collect(ps, 2)
 
             assert [m["type"] for m in result["messages"]] == ["chat", "chat"]
             assert result["messages"][0]["role"] == "USER"
@@ -170,8 +181,9 @@ def test_first_message_greeting_goes_to_chat(monkeypatch):
                 "Hi! I'm KapexAI, your business consultant. How can I help your business?"
             )
             assert events[0]["type"] == "chat"
-            assert events[1]["type"] == "suggestions"
-            assert events[2]["type"] == "end"
+            # No suggestions before the questionnaire is answered.
+            assert events[1]["type"] == "end"
+            assert not any(e["type"] == "suggestions" for e in events)
 
             msgs = await db.message.find_many(where={"sessionId": sid})
             assert sorted(m.agent for m in msgs) == ["CHAT", "CHAT"]
@@ -260,6 +272,185 @@ def test_questionnaire_rejects_nonsense_answers(monkeypatch):
                 "TOOL",
                 "TOOL",
             ]
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_questionnaire_answers_clarifying_question(monkeypatch):
+    """A clarifying question about the questionnaire itself (e.g. 'can you
+    explain this in clear words?') must NOT be rejected as a bad answer and
+    re-asked. It gets a plain-language explanation while the questionnaire stays
+    pending, so a real answer on the next turn completes it."""
+
+    async def fake_plan(self, idea):
+        return {
+            "facts": {"business_about": idea},
+            "questions": [{"key": "q1", "question": "Who is your target customer?"}],
+        }
+
+    async def fake_validate(self, questions, answers_text):
+        return "clear words" not in answers_text
+
+    async def fake_is_clarification(self, questions, answers_text):
+        return "clear words" in answers_text
+
+    async def fake_explain(self, questions, facts, user_text):
+        return [
+            {"role": "USER", "agent": "TOOL", "type": "chat", "content": user_text},
+            {
+                "role": "ASSISTANT",
+                "agent": "TOOL",
+                "type": "chat",
+                "content": "In simple terms, I'd like to know who your shop is for. "
+                "For example, students, working professionals, or tourists.",
+            },
+        ]
+
+    async def fake_is_real_idea(self, idea):
+        return True
+
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "questionnaire"}
+
+    monkeypatch.setattr(QuestionnaireTool, "_plan", fake_plan)
+    monkeypatch.setattr(QuestionnaireTool, "_validate", fake_validate)
+    monkeypatch.setattr(QuestionnaireTool, "_is_clarification", fake_is_clarification)
+    monkeypatch.setattr(QuestionnaireTool, "_explain", fake_explain)
+    monkeypatch.setattr(QuestionnaireTool, "_is_real_idea", fake_is_real_idea)
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            await process_job({"session_id": sid, "user_input": TEST_IDEA}, graph)
+            await _collect(ps, 3)
+
+            second = await process_job(
+                {"session_id": sid, "user_input": "1) can you explain this in clear words.."},
+                graph,
+            )
+            await _collect(ps, 2)
+
+            types = [m["type"] for m in second["messages"]]
+            # The clarifying question is answered conversationally — no
+            # questionnaire_invalid rejection, no completion, still pending.
+            assert "questionnaire_invalid" not in types
+            assert "questionnaire_complete" not in types
+            assert "questionnaire_answer" not in types
+            assert types[-2:] == ["chat", "chat"]
+            assert "simple terms" in second["messages"][-1]["content"].lower()
+            assert questionnaire_pending(second["messages"])
+
+            # A real answer on the next turn completes the questionnaire.
+            third = await process_job(
+                {"session_id": sid, "user_input": "Young professionals in Pune"}, graph
+            )
+            await _collect(ps, 3)
+            assert third["messages"][-1]["type"] == "questionnaire_complete"
+            assert (
+                third["messages"][-1]["context"].get("q1")
+                == "Young professionals in Pune"
+            )
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_questionnaire_structured_clarification_explains(monkeypatch):
+    """The deck's 'explain in simpler words' button sends a structured
+    clarification payload; the tool explains the requested questions with chat
+    bubbles and keeps the questionnaire pending (no rejection, no completion)."""
+
+    async def fake_plan(self, idea):
+        return {
+            "facts": {"business_about": idea},
+            "questions": [
+                {"key": "q1", "question": "What product?"},
+                {"key": "q2", "question": "Who is your target customer?"},
+            ],
+        }
+
+    async def fake_explain(self, questions, facts, user_text):
+        return [
+            {"role": "USER", "agent": "TOOL", "type": "chat", "content": user_text},
+            {
+                "role": "ASSISTANT",
+                "agent": "TOOL",
+                "type": "chat",
+                "content": "In plain words, I want to know who you will sell to.",
+            },
+        ]
+
+    async def fake_validate_structured(self, questions, answers):
+        return {a["key"]: True for a in answers}
+
+    async def fake_is_real_idea(self, idea):
+        return True
+
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "questionnaire"}
+
+    monkeypatch.setattr(QuestionnaireTool, "_plan", fake_plan)
+    monkeypatch.setattr(QuestionnaireTool, "_explain", fake_explain)
+    monkeypatch.setattr(
+        QuestionnaireTool, "_validate_structured", fake_validate_structured
+    )
+    monkeypatch.setattr(QuestionnaireTool, "_is_real_idea", fake_is_real_idea)
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            await process_job({"session_id": sid, "user_input": TEST_IDEA}, graph)
+            await _collect(ps, 3)
+
+            payload = json.dumps(
+                {"kind": "questionnaire_clarification", "keys": ["q2"]}
+            )
+            second = await process_job(
+                {"session_id": sid, "user_input": payload}, graph
+            )
+            await _collect(ps, 2)
+
+            types = [m["type"] for m in second["messages"]]
+            assert "questionnaire_invalid" not in types
+            assert "questionnaire_complete" not in types
+            assert "questionnaire_answer" not in types
+            assert types[-2:] == ["chat", "chat"]
+            assert "plain words" in second["messages"][-1]["content"]
+            assert questionnaire_pending(second["messages"])
+
+            # The deck can still be answered afterwards.
+            answers_payload = json.dumps(
+                {
+                    "kind": "questionnaire_answers",
+                    "answers": [
+                        {"key": "q1", "answer": "custom apparel"},
+                        {"key": "q2", "answer": "local event organizers"},
+                    ],
+                }
+            )
+            third = await process_job(
+                {"session_id": sid, "user_input": answers_payload}, graph
+            )
+            await _collect(ps, 2)
+            assert third["messages"][-1]["type"] == "questionnaire_complete"
+            assert third["messages"][-1]["context"]["q2"] == "local event organizers"
 
             await ps.unsubscribe(f"stream:{sid}")
             await ps.close()
@@ -394,6 +585,276 @@ def test_questionnaire_auto_starts_then_collects(monkeypatch):
     _run(scenario())
 
 
+def test_questionnaire_structured_answers_bypass_parsing(monkeypatch):
+    """Structured answers from the slide UI map 1:1 onto the questions without
+    running the LLM validate/parse steps for *free-form* text, so genuine
+    per-question answers are never rejected. (They still get per-answer
+    validation via `_validate_structured`, patched here to all-valid.)"""
+    async def fake_plan(self, idea):
+        return {
+            "facts": {"business_about": idea},
+            "questions": [
+                {"key": "q1", "question": "What product?"},
+                {"key": "q2", "question": "Where do you source?"},
+                {"key": "q3", "question": "Who is your target customer?"},
+            ],
+        }
+
+    async def fake_is_real_idea(self, idea):
+        return True
+
+    async def fake_validate(self, questions, answers_text):
+        raise AssertionError("_validate must not run for structured answers")
+
+    async def fake_validate_structured(self, questions, answers):
+        return {a["key"]: True for a in answers}
+
+    async def fake_parse(self, questions, answers_text):
+        raise AssertionError("_parse must not run for structured answers")
+
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "questionnaire"}
+
+    monkeypatch.setattr(QuestionnaireTool, "_plan", fake_plan)
+    monkeypatch.setattr(QuestionnaireTool, "_is_real_idea", fake_is_real_idea)
+    monkeypatch.setattr(QuestionnaireTool, "_validate", fake_validate)
+    monkeypatch.setattr(
+        QuestionnaireTool, "_validate_structured", fake_validate_structured
+    )
+    monkeypatch.setattr(QuestionnaireTool, "_parse", fake_parse)
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            await process_job({"session_id": sid, "user_input": TEST_IDEA}, graph)
+            await _collect(ps, 3)
+
+            payload = json.dumps(
+                {
+                    "kind": "questionnaire_answers",
+                    "answers": [
+                        {"key": "q1", "answer": "dried mango"},
+                        {"key": "q2", "answer": "local farms"},
+                        {"key": "q3", "answer": "local market"},
+                    ],
+                }
+            )
+            second = await process_job(
+                {"session_id": sid, "user_input": payload}, graph
+            )
+            events = await _collect(ps, 3)
+
+            types = [m["type"] for m in second["messages"]]
+            assert types == [
+                "questionnaire_start",
+                "questionnaire",
+                "questionnaire_answer",
+                "questionnaire_complete",
+            ]
+            complete = second["messages"][-1]
+            assert complete["type"] == "questionnaire_complete"
+            assert complete["context"]["q1"] == "dried mango"
+            assert complete["context"]["q2"] == "local farms"
+            assert complete["context"]["q3"] == "local market"
+
+            # The user bubble shows a readable summary, not the raw JSON payload.
+            answer_msg = second["messages"][-2]
+            assert answer_msg["content"] == (
+                "1) dried mango\n2) local farms\n3) local market"
+            )
+            assert "kind" not in answer_msg["content"]
+
+            assert events[0]["type"] == "questionnaire_complete"
+            assert not questionnaire_pending(second["messages"])
+            assert business_context(second["messages"])["q1"] == "dried mango"
+
+            msgs = await db.message.find_many(where={"sessionId": sid})
+            assert len(msgs) == 4
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_validate_structured_prompt_renders():
+    """The structured-answers validator prompt must render without treating the
+    JSON literals inside it (e.g. {"valid": true|false}) as template variables."""
+    from worker.prompts.questionnaire import VALIDATE_STRUCTURED_ANSWER_TEMPLATE
+
+    rendered = VALIDATE_STRUCTURED_ANSWER_TEMPLATE.invoke(
+        {
+            "question": "What product?",
+            "answer": "dried mango",
+        }
+    ).to_string()
+    assert '{"valid": true|false}' in rendered
+
+
+def test_questionnaire_structured_garbage_answers_rejected(monkeypatch):
+    """Totally random structured answers (e.g. "hehe", "bruh", "loool") must be
+    rejected per answer — the questionnaire stays pending and nothing garbage
+    enters the business context."""
+    async def fake_plan(self, idea):
+        return {
+            "facts": {"business_about": idea},
+            "questions": [
+                {"key": "q1", "question": "What product?"},
+                {"key": "q2", "question": "Where do you source?"},
+                {"key": "q3", "question": "Who is your target customer?"},
+            ],
+        }
+
+    async def fake_is_real_idea(self, idea):
+        return True
+
+    async def fake_validate_structured(self, questions, answers):
+        return {a["key"]: False for a in answers}
+
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "questionnaire"}
+
+    monkeypatch.setattr(QuestionnaireTool, "_plan", fake_plan)
+    monkeypatch.setattr(QuestionnaireTool, "_is_real_idea", fake_is_real_idea)
+    monkeypatch.setattr(
+        QuestionnaireTool, "_validate_structured", fake_validate_structured
+    )
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            await process_job({"session_id": sid, "user_input": TEST_IDEA}, graph)
+            await _collect(ps, 3)
+
+            payload = json.dumps(
+                {
+                    "kind": "questionnaire_answers",
+                    "answers": [
+                        {"key": "q1", "answer": "hehe"},
+                        {"key": "q2", "answer": "bruh"},
+                        {"key": "q3", "answer": "loool"},
+                    ],
+                }
+            )
+            second = await process_job(
+                {"session_id": sid, "user_input": payload}, graph
+            )
+            events = await _collect(ps, 2)
+
+            types = [m["type"] for m in second["messages"]]
+            # The submission is recorded but the questions are re-asked — no
+            # completion, so the questionnaire stays pending.
+            assert types[-2:] == ["questionnaire_invalid", "questionnaire"]
+            assert questionnaire_pending(second["messages"])
+
+            # The re-ask card shows ALL questions again (all answers were bad).
+            reask = second["messages"][-1]
+            assert [q["key"] for q in reask["questions"]] == ["q1", "q2", "q3"]
+            assert "business_about" in reask["facts"]
+            assert "q1" not in reask["facts"]
+
+            # The invalid USER bubble is the readable summary, not the JSON.
+            invalid = second["messages"][-2]
+            assert invalid["content"] == "1) hehe\n2) bruh\n3) loool"
+
+            assert events[0]["type"] == "questionnaire"
+            # The garbage must not leak into the business context.
+            ctx = business_context(second["messages"])
+            assert "q1" not in ctx and "q2" not in ctx and "q3" not in ctx
+
+            msgs = await db.message.find_many(where={"sessionId": sid})
+            assert len(msgs) == 4
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_questionnaire_structured_partial_garbage_keeps_valid(monkeypatch):
+    """When only some structured answers are garbage, the valid ones are folded
+    into the context and only the bad questions are re-asked."""
+    async def fake_plan(self, idea):
+        return {
+            "facts": {"business_about": idea},
+            "questions": [
+                {"key": "q1", "question": "What product?"},
+                {"key": "q2", "question": "Where do you source?"},
+                {"key": "q3", "question": "Who is your target customer?"},
+            ],
+        }
+
+    async def fake_is_real_idea(self, idea):
+        return True
+
+    async def fake_validate_structured(self, questions, answers):
+        return {a["key"]: a["key"] != "q2" for a in answers}
+
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "questionnaire"}
+
+    monkeypatch.setattr(QuestionnaireTool, "_plan", fake_plan)
+    monkeypatch.setattr(QuestionnaireTool, "_is_real_idea", fake_is_real_idea)
+    monkeypatch.setattr(
+        QuestionnaireTool, "_validate_structured", fake_validate_structured
+    )
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            await process_job({"session_id": sid, "user_input": TEST_IDEA}, graph)
+            await _collect(ps, 3)
+
+            payload = json.dumps(
+                {
+                    "kind": "questionnaire_answers",
+                    "answers": [
+                        {"key": "q1", "answer": "dried mango"},
+                        {"key": "q2", "answer": "bruh"},
+                        {"key": "q3", "answer": "local market"},
+                    ],
+                }
+            )
+            second = await process_job(
+                {"session_id": sid, "user_input": payload}, graph
+            )
+            await _collect(ps, 2)
+
+            types = [m["type"] for m in second["messages"]]
+            assert types[-2:] == ["questionnaire_invalid", "questionnaire"]
+
+            # Only q2 was invalid → only q2 is re-asked.
+            reask = second["messages"][-1]
+            assert [q["key"] for q in reask["questions"]] == ["q2"]
+            # The valid q1 answer is retained and persists through the re-ask.
+            assert reask["facts"]["q1"] == "dried mango"
+
+            assert questionnaire_pending(second["messages"])
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
 def test_tool_flow_routes_and_streams(monkeypatch):
     async def fake_classify(self, user_input, messages, tools):
         return {"intent": "tool", "tool": "web_search"}
@@ -411,6 +872,20 @@ def test_tool_flow_routes_and_streams(monkeypatch):
         session = await _make_session()
         sid = session.id
         await add_message(sid, "USER", "CHAT", {"type": "chat", "content": "seed"})
+        # web_search requires business context → seed a completed questionnaire.
+        await add_message(sid, "USER", "TOOL", {"type": "questionnaire_start", "content": TEST_IDEA})
+        await add_message(
+            sid, "ASSISTANT", "TOOL",
+            {"type": "questionnaire", "content": "q", "questions": [{"key": "q1", "question": "who?"}], "facts": {"business_about": TEST_IDEA}},
+        )
+        await add_message(
+            sid, "USER", "TOOL",
+            {"type": "questionnaire_answer", "content": "1) people", "answers": {"business_about": TEST_IDEA, "q1": "people"}},
+        )
+        await add_message(
+            sid, "ASSISTANT", "TOOL",
+            {"type": "questionnaire_complete", "content": "done", "context": {"business_about": TEST_IDEA, "q1": "people"}},
+        )
         graph = build_graph()
         ps = await _subscribe(sid)
         try:
@@ -426,12 +901,208 @@ def test_tool_flow_routes_and_streams(monkeypatch):
             assert events[2]["type"] == "end"
 
             msgs = await db.message.find_many(where={"sessionId": sid})
-            assert sorted(m.agent for m in msgs) == ["CHAT", "TOOL", "TOOL"]
+            assert sorted(m.agent for m in msgs) == [
+                "CHAT", "TOOL", "TOOL", "TOOL", "TOOL", "TOOL", "TOOL",
+            ]
 
             await ps.unsubscribe(f"stream:{sid}")
             await ps.close()
         finally:
             await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_context_tools_gated_until_questionnaire_complete(monkeypatch):
+    """SWOT (and other context-requiring tools) must NOT run until the
+    questionnaire is completed — the router redirects the request to the
+    questionnaire tool so context is gathered first."""
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "swot"}
+
+    async def fake_is_real_idea(self, idea):
+        return True
+
+    async def fake_plan(self, idea):
+        return {
+            "facts": {"business_about": idea},
+            "questions": [{"key": "q1", "question": "Who is your target customer?"}],
+        }
+
+    async def fake_swot_run(self, state):
+        raise AssertionError("swot must not run before the questionnaire is completed")
+
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+    monkeypatch.setattr(QuestionnaireTool, "_is_real_idea", fake_is_real_idea)
+    monkeypatch.setattr(QuestionnaireTool, "_plan", fake_plan)
+    monkeypatch.setattr(SwotTool, "run", fake_swot_run)
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        request = "Run a SWOT analysis for my business"
+        try:
+            result = await process_job(
+                {"session_id": sid, "user_input": request},
+                graph,
+            )
+            await _collect(ps, 3)
+
+            types = [m["type"] for m in result["messages"]]
+            assert "swot" not in types
+            assert "swot_request" not in types
+            assert types == ["questionnaire_start", "questionnaire"]
+            assert questionnaire_pending(result["messages"])
+            assert business_context(result["messages"]) == {"business_about": request}
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_context_tool_runs_after_questionnaire_complete(monkeypatch):
+    """Once the questionnaire is completed, context-requiring tools run as
+    usual with the gathered business context."""
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "swot"}
+
+    async def fake_swot_run(self, state):
+        return [
+            {"role": "USER", "agent": "TOOL", "type": "swot_request", "content": "req"},
+            {"role": "ASSISTANT", "agent": "TOOL", "type": "swot", "content": "FAKE SWOT", "sections": {}},
+        ]
+
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+    monkeypatch.setattr(SwotTool, "run", fake_swot_run)
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        await add_message(sid, "USER", "TOOL", {"type": "questionnaire_start", "content": TEST_IDEA})
+        await add_message(
+            sid, "ASSISTANT", "TOOL",
+            {"type": "questionnaire", "content": "q", "questions": [{"key": "q1", "question": "who?"}], "facts": {"business_about": TEST_IDEA}},
+        )
+        await add_message(
+            sid, "USER", "TOOL",
+            {"type": "questionnaire_answer", "content": "1) people", "answers": {"business_about": TEST_IDEA, "q1": "people"}},
+        )
+        await add_message(
+            sid, "ASSISTANT", "TOOL",
+            {"type": "questionnaire_complete", "content": "done", "context": {"business_about": TEST_IDEA, "q1": "people"}},
+        )
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            result = await process_job(
+                {"session_id": sid, "user_input": "Run a SWOT analysis"}, graph
+            )
+            events = await _collect(ps, 3)
+
+            assert result["messages"][-1]["type"] == "swot"
+            assert result["messages"][-1]["content"] == "FAKE SWOT"
+            assert events[0] == {"type": "swot", "content": "FAKE SWOT", "sections": {}}
+            assert events[1]["type"] == "suggestions"
+            assert events[2]["type"] == "end"
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_swot_tool_includes_message_history(monkeypatch):
+    """The SWOT tool must pass the conversation transcript (message history) to
+    the LLM prompt, alongside the gathered business context."""
+    captured = {}
+
+    def fake_template(inputs):
+        captured["inputs"] = dict(inputs)
+        return "ok"
+
+    def fake_llm(_):
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "summary": "test",
+                    "sections": {
+                        "strengths": ["a"],
+                        "weaknesses": ["b"],
+                        "opportunities": ["c"],
+                        "threats": ["d"],
+                    },
+                }
+            )
+        )
+
+    tool = SwotTool()
+    tool.llm = RunnableLambda(fake_llm)
+    monkeypatch.setattr(
+        "worker.tools.swot_tool.SWOT_TEMPLATE", RunnableLambda(fake_template)
+    )
+
+    async def scenario():
+        entries = await tool.run(
+            {
+                "session_id": "s",
+                "user_input": "Run a SWOT analysis",
+                "messages": [
+                    {"role": "USER", "agent": "CHAT", "type": "chat", "content": "I plan to sell dried mangoes in Pune."},
+                    {"role": "ASSISTANT", "agent": "TOOL", "type": "questionnaire_complete", "content": "done", "context": {"business_about": "dried mangoes", "business_location": "Pune"}},
+                ],
+            }
+        )
+        assert entries[1]["type"] == "swot"
+        # The transcript (message history) reached the prompt.
+        assert captured["inputs"]["transcript"] == (
+            "USER (chat): I plan to sell dried mangoes in Pune.\n"
+            "ASSISTANT (questionnaire_complete): done"
+        )
+        # The business context reached the prompt too.
+        assert "dried mangoes" in captured["inputs"]["context"]
+
+    _run(scenario())
+
+
+def test_web_search_tool_includes_message_history():
+    """The web search tool must build its system prompt from the business
+    context AND the conversation transcript."""
+    captured = {}
+
+    class FakeAgent:
+        def invoke(self, payload):
+            captured["messages"] = payload["messages"]
+            return {"messages": [SimpleNamespace(content="FINAL RESEARCH SUMMARY")]}
+
+    tool = WebSearchTool()
+    tool.agent = FakeAgent()
+
+    async def scenario():
+        entries = tool.run(
+            {
+                "session_id": "s",
+                "user_input": "Who are my top competitors?",
+                "messages": [
+                    {"role": "USER", "agent": "CHAT", "type": "chat", "content": "I plan to sell dried mangoes in Pune."},
+                    {"role": "ASSISTANT", "agent": "TOOL", "type": "questionnaire_complete", "content": "done", "context": {"business_about": "dried mangoes", "business_location": "Pune"}},
+                ],
+            }
+        )
+        assert entries[1]["type"] == "research"
+        assert entries[1]["content"] == "FINAL RESEARCH SUMMARY"
+
+        system, human = captured["messages"]
+        assert system.type == "system"
+        assert "dried mangoes" in system.content          # business context
+        assert "I plan to sell dried mangoes in Pune." in system.content  # transcript
+        assert human.content == "Who are my top competitors?"  # current request
 
     _run(scenario())
 

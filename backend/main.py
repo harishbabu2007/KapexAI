@@ -11,6 +11,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 from fastapi import FastAPI, status, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.websockets import WebSocketDisconnect
 
 from db_service import connect_db, disconnect_db, db
 from redis_service import connect_redis, disconnect_redis, redis
@@ -19,12 +20,31 @@ from .models.models import (
     WaitlistSignup,
     CreateChatSession,
     UserChatMessage,
+    SubmitQuestionnaireAnswersRequest,
+    SubmitQuestionnaireClarificationRequest,
     RenameSessionRequest,
     DeleteSessionRequest,
 )
 from .utils.db_utils import get_session, get_all_sessions
 from .routers import auth
 from .middleware.auth import get_current_user
+
+# Marks a session's most recent message that is still being processed by the
+# worker. Used so other tabs can show the in-flight message + typing indicator
+# and pick up the live stream. Cleared by the worker when the job completes.
+PENDING_KEY = "pending:{session_id}"
+PENDING_TTL = 5 * 60  # seconds
+
+
+async def mark_pending(session_id: str, content: str, msg_type: str) -> None:
+    """Records the user's latest in-flight message and flags the session as
+    PENDING so any tab can surface it while the worker is still replying."""
+    await redis.set(
+        PENDING_KEY.format(session_id=session_id),
+        json.dumps({"content": content, "type": msg_type}),
+        ex=PENDING_TTL,
+    )
+    await db.session.update(where={"id": session_id}, data={"status": "PENDING"})
 
 
 @asynccontextmanager
@@ -75,6 +95,7 @@ async def create_chat_session(user_data: CreateChatSession, current_user = Depen
 
     job = {"job_id": str(uuid4()), "session_id": session.id, "user_input": user_data.content}
     await redis.lpush("jobs:queue", json.dumps(job))
+    await mark_pending(session.id, user_data.content, "chat")
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -94,6 +115,63 @@ async def push_chat_message(user_data: UserChatMessage, current_user = Depends(g
 
     job = {"job_id": str(uuid4()), "session_id": session.id, "user_input": user_data.content}
     await redis.lpush("jobs:queue", json.dumps(job))
+    await mark_pending(session.id, user_data.content, "chat")
+
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content={"message": "success", "session_id": session.id, "job_id": job["job_id"]},
+    )
+
+
+@app.post("/submit_questionnaire_answers")
+async def submit_questionnaire_answers(user_data: SubmitQuestionnaireAnswersRequest, current_user = Depends(get_current_user)):
+    """Submits structured questionnaire answers for a session. The answers are
+    pushed as a job whose `user_input` carries a structured payload, so the
+    worker can fold them into the business context without re-parsing free text."""
+    session = await get_session(user_data.session_id)
+    if not session or session.userId != current_user.id:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": "session not found for user"},
+        )
+
+    payload = json.dumps(
+        {
+            "kind": "questionnaire_answers",
+            "answers": [{"key": a.key, "answer": a.answer} for a in user_data.answers],
+        }
+    )
+    job = {"job_id": str(uuid4()), "session_id": session.id, "user_input": payload}
+    await redis.lpush("jobs:queue", json.dumps(job))
+
+    content = "\n".join(
+        f"{i + 1}) {a.answer or 'Skipped'}" for i, a in enumerate(user_data.answers)
+    )
+    await mark_pending(session.id, content, "questionnaire_answer")
+
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content={"message": "success", "session_id": session.id, "job_id": job["job_id"]},
+    )
+
+@app.post("/submit_questionnaire_clarification")
+async def submit_questionnaire_clarification(user_data: SubmitQuestionnaireClarificationRequest, current_user = Depends(get_current_user)):
+    """Requests a plain-language explanation of specific questionnaire questions.
+    Pushed as a structured job so the worker can explain without re-parsing free
+    text or rejecting the request as a bad answer."""
+    session = await get_session(user_data.session_id)
+    if not session or session.userId != current_user.id:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": "session not found for user"},
+        )
+
+    payload = json.dumps(
+        {"kind": "questionnaire_clarification", "keys": user_data.keys}
+    )
+    job = {"job_id": str(uuid4()), "session_id": session.id, "user_input": payload}
+    await redis.lpush("jobs:queue", json.dumps(job))
+    await mark_pending(session.id, "Asked for a simpler explanation", "chat")
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -146,7 +224,12 @@ async def get_messages(session_id: str, current_user = Depends(get_current_user)
             }
         )
 
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"data": data})
+    pending_raw = await redis.get(PENDING_KEY.format(session_id=session_id))
+    pending = json.loads(pending_raw) if pending_raw else None
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content={"data": data, "pending": pending}
+    )
 
 
 @app.post("/rename_session")
@@ -193,6 +276,7 @@ async def delete_session(user_data: DeleteSessionRequest, current_user = Depends
 
     # Drop any cached graph state so it can't be resurrected by the worker.
     await redis.delete(f"langgraph_state:{session.id}")
+    await redis.delete(PENDING_KEY.format(session_id=session.id))
 
     await db.message.delete_many(where={"sessionId": session.id})
     await db.session.delete(where={"id": session.id})
@@ -206,16 +290,46 @@ async def delete_session(user_data: DeleteSessionRequest, current_user = Depends
 @app.websocket("/ws/session/{session_id}")
 async def websocket_stream(websocket: WebSocket, session_id: str):
     await websocket.accept()
+
+    # If no job is in flight for this session, nothing will be published to the
+    # channel — close right away instead of holding an idle connection open.
+    if not await redis.get(PENDING_KEY.format(session_id=session_id)):
+        await _safe_send(websocket, {"type": "end"})
+        await websocket.close()
+        return
+
     pubsub = redis.pubsub()
     await pubsub.subscribe(f"stream:{session_id}")
 
-    async for message in pubsub.listen():
-        if message["type"] == "message":
+    try:
+        while True:
+            message = await pubsub.get_message(
+                ignore_subscribe_messages=True, timeout=10
+            )
+            if message is None:
+                # Idle: if the worker has finished (pending cleared) there is
+                # nothing left to stream, so signal the end and close.
+                if not await redis.get(PENDING_KEY.format(session_id=session_id)):
+                    await _safe_send(websocket, {"type": "end"})
+                    break
+                continue
             data = json.loads(message["data"])
-            await websocket.send_json(data)
+            if not await _safe_send(websocket, data):
+                # The client disconnected mid-stream — stop forwarding.
+                break
             if data.get("type") == "end":
                 break
-
-    await pubsub.unsubscribe(f"stream:{session_id}")
-    await pubsub.close()
+    finally:
+        await pubsub.unsubscribe(f"stream:{session_id}")
+        await pubsub.close()
     await websocket.close()
+
+
+async def _safe_send(websocket: WebSocket, data: dict) -> bool:
+    """Sends a frame, returning False when the client has already gone. A tab
+    that closed mid-stream (e.g. navigating away) must not crash the endpoint."""
+    try:
+        await websocket.send_json(data)
+        return True
+    except (WebSocketDisconnect, RuntimeError):
+        return False

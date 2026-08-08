@@ -9,19 +9,7 @@ interface MessageComponentProps {
   message: ChatMessage
 }
 
-export function renderMessageCard(message: ChatMessage) {
-  switch (message.type) {
-    case 'swot':
-      return <SwotCard message={message} />
-    case 'research':
-      return <ResearchCard message={message} />
-    case 'questionnaire':
-      return <QuestionnaireCard message={message} />
-    case 'questionnaire_complete':
-      return <QuestionnaireCompleteCard message={message} />
-    case 'markdown':
-    case 'chat':
-    default:
-      return <MarkdownMessage message={message} />
-  }
+export function MessageContent(props: MessageComponentProps) {
+  const Component = registry[props.message.type] ?? MarkdownMessage
+  return <Component {...props} />
 }

@@ -58,15 +58,80 @@ Decide whether the reply is a genuine attempt to answer the questions with busin
 Mark it INVALID if it is:
 - gibberish, random characters, or filler (e.g. "asdf", "bla bla", lorem ipsum, repeated keystrokes)
 - completely off-topic or unrelated to the questions
-- a refusal to answer, or an attempt to change the subject or derail the questionnaire
+- an explicit refusal to engage with the questionnaire (e.g. "I don't want to answer", "stop asking me")
 
-Mark it VALID if it answers at least one question meaningfully, even if partial or incomplete.
+Mark it VALID if it answers at least one question on-topic, even if partial or incomplete.
+
+IMPORTANT: an honest answer that the entrepreneur is unsure or hasn't decided yet — such as "not sure", "I don't know", "haven't decided", "no clue yet", "need to figure it out" — is a VALID answer for that question. It reflects real business uncertainty and must NOT be rejected or re-asked.
 
 Return ONLY valid JSON, nothing else:
 {{"valid": true|false, "reason": "<short explanation>"}}"""
 
 VALIDATE_ANSWERS_TEMPLATE = ChatPromptTemplate.from_messages(
     [("human", VALIDATE_ANSWERS_PROMPT)]
+)
+
+VALIDATE_STRUCTURED_ANSWER_PROMPT = """\
+You check whether an entrepreneur's typed answer genuinely responds to its questionnaire question. You only reject clear garbage.
+
+Question:
+{question}
+
+The entrepreneur's answer:
+{answer}
+
+Mark valid=false ONLY when the answer is:
+- gibberish, random keystrokes, or filler (e.g. "asdf", "hehe", "lol", "bruh", "loool", repeated keystrokes, lorem ipsum)
+- completely off-topic or unrelated to the question
+- an explicit refusal to engage (e.g. "I don't want to answer", "stop asking")
+
+In every other case mark valid=true. In particular:
+- A short or partial answer is valid if it is on-topic, even if it only addresses part of a compound question.
+- "not sure", "I don't know", "haven't decided", "idk", "no idea" are VALID answers.
+- Spelling mistakes, casual or informal wording, and incomplete sentences are VALID.
+
+Return ONLY valid JSON, nothing else:
+{{"valid": true|false}}"""
+
+VALIDATE_STRUCTURED_ANSWER_TEMPLATE = ChatPromptTemplate.from_messages(
+    [("human", VALIDATE_STRUCTURED_ANSWER_PROMPT)]
+)
+
+CLARIFY_REQUEST_PROMPT = """\
+You keep a business questionnaire interview on track by deciding whether an entrepreneur's message is a clarifying question about the questionnaire itself, rather than an attempt to answer it.
+
+Questions:
+{questions}
+
+The entrepreneur wrote the following message while the questionnaire is still pending:
+{message}
+
+Mark clarification=true when the message contains a question ABOUT the questionnaire or its questions — for example asking to rephrase something in simpler words, what a term means, why a question is being asked, how to answer, or an example. This is still true when the user ALSO tried to answer some of the questions in the same message — a clarification request mixed with partial answers is still a clarification request, and the partial answers should not be silently rejected.
+
+Mark clarification=false when the message is purely an attempt to answer the questions (even partially, informally, or with "not sure"/"I don't know"), or is gibberish/nonsense with no question about the questionnaire.
+
+Return ONLY valid JSON, nothing else:
+{{"clarification": true|false}}"""
+
+CLARIFY_REQUEST_TEMPLATE = ChatPromptTemplate.from_messages(
+    [("human", CLARIFY_REQUEST_PROMPT)]
+)
+
+EXPLAIN_QUESTIONS_PROMPT = """\
+You are a business consultant helping an entrepreneur understand the questionnaire you just asked them. The entrepreneur is confused and asked:
+
+{user_message}
+
+Business idea:
+{idea}
+
+Questions:
+{questions}
+
+Rephrase each question in simple, plain, friendly words that an everyday person can understand, and briefly say why it matters for their business. If the entrepreneur asked about a specific question (e.g. by number or topic), focus your explanation on that one. Keep it short, warm, and encouraging, using markdown bullets. End with a one-line prompt inviting them to answer. Never give up on the questionnaire — you are only clarifying, the interview continues after this."""
+
+EXPLAIN_QUESTIONS_TEMPLATE = ChatPromptTemplate.from_messages(
+    [("human", EXPLAIN_QUESTIONS_PROMPT)]
 )
 
 IS_IDEA_PROMPT = """\

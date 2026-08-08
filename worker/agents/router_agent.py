@@ -14,7 +14,7 @@ from worker.prompts.router import ROUTER_TEMPLATE
 
 class RouterAgent:
     def __init__(self) -> None:
-        self.llm = ChatMistralAI(model="mistral-small-2506", temperature=0)
+        self.llm = ChatMistralAI(model="mistral-small-2506", temperature=0.1)
 
     async def classify(
         self, user_input: str, messages: list[dict], tools: list[dict]
