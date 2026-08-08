@@ -9,6 +9,10 @@ class Tool:
     description: str = ""
     example: str = ""
     suggestion: str = ""
+    # True when the tool needs the completed questionnaire's business context
+    # (e.g. SWOT, research). The router refuses to dispatch such tools until the
+    # questionnaire has been completed.
+    requires_context: bool = False
 
     def run(self, state: dict) -> list[dict]:
         """Handle the current user message.

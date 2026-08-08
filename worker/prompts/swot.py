@@ -3,13 +3,18 @@ from langchain_core.prompts import ChatPromptTemplate
 SWOT_PROMPT = """\
 You are a business strategy analyst. Build a SWOT analysis for the user's business.
 
-Known business context:
+Business context gathered so far:
 {context}
+
+Conversation so far:
+{transcript}
 
 User's request:
 {request}
 
-Use the business context when available; otherwise work from the request alone. Be specific and practical.
+Ground the analysis in the business context and the conversation history — use what \
+the user has shared about their business, market, goals and constraints. If there is \
+no context or history yet, work from the request alone. Be specific and practical.
 
 Return ONLY valid JSON with this exact shape, nothing else:
 {{"summary": "<one-line takeaway>", "sections": {{"strengths": ["..."], "weaknesses": ["..."], "opportunities": ["..."], "threats": ["..."]}}}}
