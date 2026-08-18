@@ -1,4 +1,5 @@
 import type { ComponentType } from 'react'
+import { AstrologyCard } from './AstrologyCard'
 import { MarkdownMessage } from './MarkdownMessage'
 import { QuestionnaireCard } from './QuestionnaireCard'
 import { QuestionnaireCompleteCard } from './QuestionnaireCompleteCard'
@@ -25,6 +26,7 @@ const registry: Record<string, ComponentType<MessageComponentProps>> = {
   questionnaire_complete: QuestionnaireCompleteCard,
   swot: SwotCard,
   research: ResearchCard,
+  astrology: AstrologyCard,
 }
 
 export function MessageContent(props: MessageComponentProps) {

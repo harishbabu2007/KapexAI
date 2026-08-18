@@ -1,3 +1,4 @@
+from worker.tools.astrology_tool import AstrologyTool
 from worker.tools.base import Tool
 from worker.tools.finance_tool import FinanceTool
 from worker.tools.questionnaire_tool import QuestionnaireTool
@@ -15,6 +16,7 @@ register(QuestionnaireTool())
 register(SwotTool())
 register(WebSearchTool())
 register(FinanceTool())
+register(AstrologyTool())
 
 
 def get_tool(name: str) -> Tool | None:

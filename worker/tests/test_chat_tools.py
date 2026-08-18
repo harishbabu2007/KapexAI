@@ -159,6 +159,7 @@ def test_chat_flow_persists_and_streams(monkeypatch):
                 "swot",
                 "web_search",
                 "finance",
+                "astrology",
             }
 
             msgs = await db.message.find_many(where={"sessionId": sid})
