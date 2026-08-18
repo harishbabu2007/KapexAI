@@ -24,3 +24,8 @@ include = ["worker*"]
 [tool.uv.sources]
 db-service = { workspace = true }
 redis-service = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]

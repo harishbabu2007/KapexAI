@@ -158,6 +158,7 @@ the chat agent, and the `suggestions` frame:
 register(QuestionnaireTool())
 register(SwotTool())
 register(WebSearchTool())
+register(FinanceTool())
 ```
 
 ### Built-in tools
@@ -167,12 +168,31 @@ register(WebSearchTool())
 | `questionnaire` | `questionnaire` / `questionnaire_complete` | Multi-turn: asks up to 5 targeted questions, then folds the answers into structured business context (slide UI in the frontend) | — |
 | `swot` | `swot` | Generates a SWOT analysis as structured sections | yes (`requires_context`) |
 | `web_search` | `research` | Live web research via a Tavily-powered react agent | yes (`requires_context`) |
+| `finance` | `finance` | Financial calculations and analysis (returns, valuation, risk, equity metrics, SEC public filings) via an internal react agent | — |
 
 Every tool's `run(state)` has access to `state["messages"]` — the message log —
 so it can use both the collected business context (`business_context`) and the
 conversation transcript (`format_transcript`) alongside the current request.
 `SwotTool` interpolates both into its prompt template; `WebSearchTool` builds its
 react agent's system prompt per request from the same two sources.
+
+### The finance tool (`finance`)
+
+`finance` is a single top-level tool that exposes **109 internal finance
+functions** to its own LangGraph react agent (the same pattern `web_search`
+uses with `tavily_search`). The 109 underlying tools live in
+`worker/tools/finance_calculators.py` (60 calculators), `equity_calculators.py`
+(43 equity models) and `finance_tools.py` (6 finance/SEC tools) and are **never**
+registered in KapexAI's main tool registry — the router, chat agent and
+`suggestions` frame only ever see `finance`.
+
+When a user asks a finance question, the react agent picks the right underlying
+tool(s), extracts the arguments, calls them (one or several in sequence), and
+writes a single answer. The agent is created once at construction and reused
+across calls; its system prompt is rebuilt per request with the business context
+and transcript. SEC lookups require the `SEC_USER_AGENT` environment variable;
+missing config, bad CIKs, or HTTP failures surface as friendly `error` fields
+(or a clear assistant message) instead of raw exceptions.
 
 ## Message formats
 
@@ -231,6 +251,13 @@ bullets, ending with a short **"Next steps"** section that poses **2-3 specific
 follow-up questions** to the user (e.g. about their competitors, target
 demographics, or pricing) so the conversation keeps moving after the result.
 
+### Finance (`agent: "TOOL"`)
+
+| role | `type` | extra fields |
+|---|---|---|
+| USER | `finance_request` | `content` (the user's finance question) |
+| ASSISTANT | `finance` | `content` (the computed answer, markdown) |
+
 ## Streaming protocol
 
 Each node publishes JSON frames to the pub/sub channel `stream:{session_id}`
@@ -244,6 +271,7 @@ Each node publishes JSON frames to the pub/sub channel `stream:{session_id}`
 | `questionnaire_complete` | `content`, `context` | Acknowledges the collected answers |
 | `swot` | `content`, `sections`, `summary` | SWOT analysis result |
 | `research` | `content` | Web search result |
+| `finance` | `content` | Finance calculation / analysis result (rendered as markdown) |
 | `suggestions` | `tools: [{name, description, example, suggestion}]` | "wanna try this next?" — the user can pick one to trigger a tool |
 | `end` | — | Signals the turn is finished |
 | `error` | `job_id`, `content` | The job failed; the session is marked `FAILED` |
@@ -264,6 +292,10 @@ That's it — the router prompt, chat context, and `suggestions` frame all read
 from the registry, so the new tool is immediately visible to the model and the
 frontend. Example (a future "location trend analysis" tool would follow the same
 pattern as `swot_tool.py`).
+
+For tools with many sub-operations, follow the `finance` tool instead: keep the
+sub-functions as internal LangChain tools in dedicated modules, bind them all to
+one react agent inside the tool, and register only the single top-level tool.
 
 ## Error handling
 

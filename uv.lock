@@ -2542,6 +2542,11 @@ dependencies = [
     { name = "tavily-python" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "db-service", editable = "services/database" },
@@ -2553,6 +2558,9 @@ requires-dist = [
     { name = "redis-service", editable = "services/redis-service" },
     { name = "tavily-python", specifier = ">=0.7.26" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "wsproto"
