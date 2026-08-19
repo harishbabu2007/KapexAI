@@ -72,7 +72,7 @@ Vite + React (TypeScript), deps managed via `frontend/package.json` (`npm instal
 - Chat state: `src/hooks/useChatSession.ts` (sessions list, active session, streaming via WebSocket, rename/delete handlers)
 - Styling: `src/styles/global.css` (landing) + `src/styles/chat.css` (workspace)
 - Env: `VITE_API_BASE_URL` (default `http://localhost:8000`), `VITE_GOOGLE_CLIENT_ID` (in `frontend/.env.local`)
-- Message rendering: `src/components/messages/` maps each tool's `type` to a card component
+- Message rendering: `src/components/messages/` maps each tool's `type` to a card component — including `legal_research`/`case_search`/`issue_register` (`LegalResearchCard`, `CaseSearchCard`, `IssueRegisterCard`); unknown types fall back to plain markdown
 
 ## OpenCode
 
@@ -134,6 +134,6 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 | `frontend/src/pages/ChatPage.tsx` | Chat workspace layout (sidebar + messages + composer); scrolls to bottom only on send/session switch, never on incoming content |
 | `frontend/src/pages/BusinessProfilePage.tsx` | First-fill profile page — collects the seven profile fields, Save → `/chat`, "Skip for now" |
 | `frontend/src/components/chat/Sidebar.tsx` | Session list with per-session ⋯ menu (rename inline, delete confirm) + "Business profile" button |
-| `frontend/src/components/messages/` | Per-tool message card components, keyed by message `type` |
+| `frontend/src/components/messages/` | Per-tool message card components, keyed by message `type` (incl. `LegalResearchCard`, `CaseSearchCard`, `IssueRegisterCard`) |
 
 Before running either service, ensure the Prisma client is generated: `make generate`.
