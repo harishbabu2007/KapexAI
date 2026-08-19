@@ -35,6 +35,7 @@ Frontend deps go in `frontend/package.json` via `npm install <pkg>`.
 - Run worker tests: `PYTHONPATH=. uv run --package worker pytest worker/tests/ -v` (worker tests hit real DB + Redis)
 - Test files: `backend/tests/test_*.py`, `worker/tests/test_*.py`
 - Frontend: no test framework; verify with `npm run build` (runs `tsc -b`)
+- `worker/tests/conftest.py` owns the **single** event loop + the session-scoped DB/Redis `services` fixture. All worker test modules must use `from conftest import run as _run` — the `redis_service` client binds connections to whichever loop created them, so a second loop in the same pytest process (e.g. a second test file) collides with the first
 
 ## Services
 
@@ -93,6 +94,8 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
    - The **router** sends greetings/small talk to the chat agent (which stays strictly business-focused) and routes a shared business idea to the **questionnaire tool** to build context; "set up / start / build a business" is also routed to the questionnaire so new users get the guided setup instead of an open-ended "what do you need?". While questions are pending, answers are routed back to the questionnaire automatically. The chat agent never repeats an already-asked question and, when there's no business context yet, proactively offers the guided setup.
    - Tools that need business context (`swot`, `web_search`, marked `requires_context = True` on the `Tool`) are **gated**: they only run after the questionnaire completes (`questionnaire_complete`); before that the router redirects the request to the questionnaire tool so context exists first.
    - The questionnaire answers are collected by the frontend **slide UI** (one question at a time) and submitted as structured `{key, answer}` pairs via `POST /submit_questionnaire_answers`; the worker maps them into context by key without LLM parsing, but validates each non-empty answer per-question (gibberish is rejected and re-asked, never absorbed). Free-form typed answers fall back to LLM validation/parsing.
+   - **Questionnaire idea guard** — `QuestionnaireTool._is_real_idea()` decides whether the first message starts the questionnaire. It is **deterministic first**: rejects questionnaire commands ("start the business questionnaire"), greetings, and gibberish, and accepts any ≥2-word/≥8-char message as a valid idea ("south indian restaurant in pune") without calling the LLM. The LLM only adjudicates short single words, and fails open (any parse/API hiccup accepts rather than blocking a plausible idea).
+   - **Legal & regulatory tools** (`indian_legal_search`, `indian_case_search`, `legal_issue_register`) are registered with `requires_context = False` so they run on any session without needing the questionnaire first. `indian_legal_search` discovers official sources via Tavily over a centralized **domain allowlist** (`worker/helpers/indian_sources.py`, 10 `.gov.in`/`.nic.in` domains) and grounds results in Python (invented URLs dropped, titles verbatim, official results first); `indian_case_search` queries the Indian Kanoon API (needs `INDIANKANOON_API_TOKEN` via `worker/helpers/cached_http.py`, TTL-cached) and is always labelled a third-party database; `legal_issue_register` scores compliance issues deterministically (`likelihood × severity × urgency` → critical/high/medium/low) and clamps LLM factors. Message types: `legal_research`, `case_search`, `issue_register`.
    - Every chat/tool turn ends by streaming a `suggestions` event listing available tools (name + example + suggestion phrase) and an `end` event.
 4. **Streaming** — each node publishes to pub/sub channel `stream:{session_id}`; the backend WebSocket endpoint `ws/session/{session_id}` forwards it to the client. The socket closes right away if no job is in flight for the session and treats a client disconnecting mid-stream as a normal close.
 5. **State** — a **message log** (`messages`) is cached in Redis (`langgraph_state:{session_id}`, 24h TTL) and rebuilt from DB message history (ordered by `created_at`) via `worker/helpers/persistence.py`. Each log entry is `{role, agent, type, content, ...tool-specific fields}`.
@@ -115,10 +118,12 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 | `worker/helpers/persistence.py` | Prisma helpers (`get_business_profile`) + DB message-log rebuild for the worker |
 | `worker/helpers/messages.py` | Message-log helpers (transcript, questionnaire state, business profile injection/context) |
 | `worker/helpers/events.py` | Pub/sub stream publishing helpers |
-| `worker/tools/` | Plug-and-play tools: `base.py`, `registry.py`, `questionnaire_tool.py`, `swot_tool.py`, `web_search_tool.py` |
-| `worker/prompts/` | LLM prompt templates per agent/tool |
+| `worker/helpers/cached_http.py` | TTL-cached HTTP for tools (`cached_json`): Redis `tool_cache:` keys, retry/backoff on transient failures, `require_env`, typed `ToolError`s. Cache keys never include headers, so tokens can't leak into keys |
+| `worker/helpers/indian_sources.py` | Centralized Indian official-source allowlist (10 `.gov.in`/`.nic.in` domains) + `classify_source` → `(official_source, source_type, authority)` |
+| `worker/tools/` | Plug-and-play tools: `base.py`, `registry.py`, `questionnaire_tool.py`, `swot_tool.py`, `web_search_tool.py`, `legal_tools.py` (`indian_legal_search`, `indian_case_search`, `legal_issue_register`) |
+| `worker/prompts/` | LLM prompt templates per agent/tool (`router.py`, `chat.py`, `questionnaire.py`, `legal.py`) |
 | `worker/tools/tavily_search.py` | Tavily search tool used by `web_search_tool` |
-| `worker/tests/` | `test_chat_tools.py` — queue/pub-sub, chat, tool, questionnaire, state-rebuild tests |
+| `worker/tests/` | `test_chat_tools.py` (queue/pub-sub, chat, tool, questionnaire, state-rebuild tests), `test_legal_tools.py` (30 legal-tool tests incl. real E2E flows), `test_questionnaire_idea.py` (deterministic `_is_real_idea` guard tests) |
 | `backend/tests/` | `test_main.py`, `test_jwt_utils.py`, `test_auth.py`, `test_middleware.py`, `test_db_utils.py` |
 | `frontend/src/lib/api.ts` | Typed HTTP client (`request`, `ApiError`, `wsUrl`, auth/session/waitlist/profile calls) |
 | `frontend/src/lib/auth.tsx` | AuthProvider — Google sign-in, `localStorage` session persistence, 401-only clearing, `profileEmpty` state + `markProfileFilled` |
