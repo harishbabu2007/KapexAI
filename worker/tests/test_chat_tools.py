@@ -1,13 +1,12 @@
-import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-import pytest
-from db_service import connect_db, db, disconnect_db
+from conftest import run as _run
+from db_service import db
 from langchain_core.runnables import RunnableLambda
-from redis_service import connect_redis, disconnect_redis, redis
+from redis_service import redis
 
 from worker.agent import build_graph, load_state, process_job
 from worker.agents.chat_agent import ChatAgent
@@ -29,25 +28,6 @@ TEST_IDEA = (
     "I want to open a specialty coffee shop in Pune, aiming for 5 stores in "
     "5 years, targeting young professionals."
 )
-
-_loop = asyncio.new_event_loop()
-asyncio.set_event_loop(_loop)
-
-
-def _run(coro):
-    return _loop.run_until_complete(coro)
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _services():
-    _run(connect_db())
-    _run(connect_redis())
-    yield
-    _run(disconnect_redis())
-    _run(disconnect_db())
-    _run(_loop.shutdown_asyncgens())
-    _loop.close()
-
 
 async def _cleanup(session_id=None):
     if session_id:
@@ -159,6 +139,9 @@ def test_chat_flow_persists_and_streams(monkeypatch):
                 "swot",
                 "web_search",
                 "astrology",
+                "indian_legal_search",
+                "indian_case_search",
+                "legal_issue_register",
             }
 
             msgs = await db.message.find_many(where={"sessionId": sid})
@@ -256,7 +239,7 @@ def test_questionnaire_rejects_nonsense_answers(monkeypatch):
             second = await process_job(
                 {"session_id": sid, "user_input": "bla bal ....."}, graph
             )
-            events2 = await _collect(ps, 3)
+            await _collect(ps, 3)
 
             types = [m["type"] for m in second["messages"]]
             assert "questionnaire_answer" not in types
@@ -507,7 +490,7 @@ def test_questionnaire_asks_for_idea_when_trigger_phrase(monkeypatch):
                 {"session_id": sid, "user_input": "Start the business questionnaire"},
                 graph,
             )
-            events = await _collect(ps, 2)
+            await _collect(ps, 2)
 
             types = [m["type"] for m in result["messages"]]
             assert "questionnaire_start" not in types
@@ -520,6 +503,117 @@ def test_questionnaire_asks_for_idea_when_trigger_phrase(monkeypatch):
 
             msgs = await db.message.find_many(where={"sessionId": sid})
             assert [m.agent for m in msgs] == ["TOOL", "TOOL"]
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_questionnaire_starts_for_short_idea(monkeypatch):
+    """A short but meaningful business idea must start the questionnaire
+    (questionnaire_start → questionnaire), never trigger another ask-for-idea."""
+
+    async def fake_plan(self, idea):
+        return {
+            "facts": {"business_about": idea, "business_location": "Pune"},
+            "questions": [
+                {"key": "q1", "question": "Who is your target customer?"},
+                {"key": "q2", "question": "How will you fund this?"},
+            ],
+        }
+
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "questionnaire"}
+
+    monkeypatch.setattr(QuestionnaireTool, "_plan", fake_plan)
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+    # NOTE: `_is_real_idea` is deliberately NOT patched — the real (now
+    # deterministic) logic must accept "south indian restaurant in pune".
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            result = await process_job(
+                {"session_id": sid, "user_input": "south indian restaurant in pune"},
+                graph,
+            )
+            await _collect(ps, 2)
+
+            types = [m["type"] for m in result["messages"]]
+            assert types == ["questionnaire_start", "questionnaire"]
+            assert "questionnaire_request" not in types
+            assert result["messages"][1]["questions"]
+
+            await ps.unsubscribe(f"stream:{sid}")
+            await ps.close()
+        finally:
+            await _cleanup(sid)
+
+    _run(scenario())
+
+
+def test_questionnaire_ui_sequence_no_idea_repeat(monkeypatch):
+    """The exact reported UI sequence — a greeting+idea message followed by a
+    plain short idea — must never ask for the business idea again; the
+    questionnaire must actually start and collect the answers."""
+
+    async def fake_plan(self, idea):
+        return {
+            "facts": {"business_about": idea, "business_location": "Pune"},
+            "questions": [
+                {"key": "q1", "question": "Who is your target customer?"},
+                {"key": "q2", "question": "How will you fund this?"},
+            ],
+        }
+
+    async def fake_validate(self, questions, answers_text):
+        return True
+
+    async def fake_parse(self, questions, answers_text):
+        return ["Young professionals in Pune", "Self-funded"]
+
+    async def fake_classify(self, user_input, messages, tools):
+        return {"intent": "tool", "tool": "questionnaire"}
+
+    monkeypatch.setattr(QuestionnaireTool, "_plan", fake_plan)
+    monkeypatch.setattr(QuestionnaireTool, "_validate", fake_validate)
+    monkeypatch.setattr(QuestionnaireTool, "_parse", fake_parse)
+    monkeypatch.setattr(RouterAgent, "classify", fake_classify)
+    # `_is_real_idea` is again NOT patched — the real logic must accept both.
+
+    async def scenario():
+        session = await _make_session()
+        sid = session.id
+        graph = build_graph()
+        ps = await _subscribe(sid)
+        try:
+            first = await process_job(
+                {
+                    "session_id": sid,
+                    "user_input": "hi i want to open south indian business in pune",
+                },
+                graph,
+            )
+            await _collect(ps, 2)
+            assert [m["type"] for m in first["messages"]] == [
+                "questionnaire_start",
+                "questionnaire",
+            ]
+
+            second = await process_job(
+                {"session_id": sid, "user_input": "south indian restaurant in pune"},
+                graph,
+            )
+            await _collect(ps, 2)
+            second_types = [m["type"] for m in second["messages"]]
+            assert "questionnaire_request" not in second_types
+            assert second_types[-1] == "questionnaire_complete"
 
             await ps.unsubscribe(f"stream:{sid}")
             await ps.close()

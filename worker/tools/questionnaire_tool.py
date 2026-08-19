@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -25,6 +26,77 @@ from worker.tools.base import Tool
 FACTS_KEYS = ("business_location", "business_vision", "target_customers")
 
 MAX_REASKS = 2  # how often a single question may be re-asked before accepting
+
+# Greetings/small talk that are never business ideas, even though they are
+# meaningful prose. Kept deliberately small — anything longer or more specific
+# is treated as an idea (conservative acceptance) rather than being rejected.
+_GREETINGS = {
+    "hi",
+    "hello",
+    "hey",
+    "hii",
+    "heyy",
+    "heya",
+    "hiya",
+    "hola",
+    "yo",
+    "sup",
+    "namaste",
+    "namaskar",
+    "hi there",
+    "hey there",
+    "hello there",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "good night",
+    "how are you",
+    "how are you doing",
+    "whats up",
+    "what's up",
+    "are you there",
+}
+
+
+def _normalize(text: str) -> str:
+    """Lowercases, removes punctuation and collapses whitespace so the
+    deterministic checks below survive capitalization/casual typing."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text.lower())).strip()
+
+
+def _is_questionnaire_command(text: str) -> bool:
+    """True when the message is purely a command to run the questionnaire
+    (e.g. "start the business questionnaire", "begin questionnaire"). The word
+    "questionnaire" appearing anywhere in the message is treated as a command
+    — business ideas essentially never mention it."""
+    compact = re.sub(r"\W", "", text)
+    return "questionnaire" in compact
+
+
+def _is_gibberish(text: str, tokens: list[str]) -> bool:
+    """True for keyboard mashing, filler and single-word fragments that cannot
+    describe a business. Multi-token messages with real words are always
+    meaningful enough to proceed."""
+    if len(tokens) == 1 and len(text) <= 5:
+        return True  # "asdf", "start", "cafe" — no meaningful idea here
+    if len(tokens) > 1 and all(t == tokens[0] for t in tokens):
+        return True  # "bla bla", "ha ha", "test test"
+    for token in tokens:
+        if len(token) >= 3 and not re.search(r"[aeiouy]", token):
+            return True  # random consonant mash ("qwerty", "zxcvbn")
+        if re.search(r"(.)\1\1", token):
+            return True  # repeated keystrokes ("ssss", "haaaa")
+    return False
+
+
+def _is_obvious_idea(text: str, tokens: list[str]) -> bool:
+    """True when the message clearly describes a business without needing the
+    LLM: at least two words totalling eight or more characters. This covers
+    short-but-meaningful ideas ("south indian restaurant in pune",
+    "coffee shop in Pune") that a conservative LLM might reject."""
+    return len(text) >= 8 and len(tokens) >= 2
 
 
 class QuestionnaireTool(Tool):
@@ -392,13 +464,35 @@ class QuestionnaireTool(Tool):
 
     async def _is_real_idea(self, idea: str) -> bool:
         """True when the user's first message actually describes a business
-        idea rather than being a command/greeting/gibberish."""
-        chain = IS_IDEA_TEMPLATE | self.llm
-        response = await chain.ainvoke({"idea": idea})
-        try:
-            data = parse_json(response.content)
-        except (json.JSONDecodeError, IndexError):
-            return False  # on a parse hiccup, ask for the idea instead of guessing
-        if not isinstance(data, dict):
+        idea rather than being a command/greeting/gibberish.
+
+        Deterministic checks run first and decide the obvious cases with no
+        LLM dependency (a business description that simply names the product
+        and place must never be blocked — and must not fail when Mistral is
+        slow/down or returns malformed JSON). The LLM is retained only for the
+        ambiguous middle (short single words), where classifying the intent
+        adds value. In that middle path a malformed or failed response accepts
+        instead of rejecting: the command/greeting/gibberish rejections above
+        already guaranteed the message is plausible, so the safer outcome is
+        to let the questionnaire proceed rather than ask for the idea again.
+        """
+        text = _normalize(idea)
+        tokens = text.split()
+        if not tokens:
             return False
-        return bool(data.get("real_idea"))
+        if _is_questionnaire_command(text):
+            return False
+        if text in _GREETINGS:
+            return False
+        if _is_gibberish(text, tokens):
+            return False
+        if _is_obvious_idea(text, tokens):
+            return True
+
+        chain = IS_IDEA_TEMPLATE | self.llm
+        try:
+            response = await chain.ainvoke({"idea": idea})
+            data = parse_json(response.content)
+            return bool(data.get("real_idea")) if isinstance(data, dict) else True
+        except Exception:  # noqa: BLE001 - LLM/parse/network hiccup: accept, don't block
+            return True

@@ -44,6 +44,50 @@ export type SwotSections = {
   threats: string[]
 }
 
+/** A single regulatory/legal item found by `indian_legal_search`. */
+export type LegalResearchResult = {
+  title: string | null
+  source_url: string | null
+  authority: string | null
+  official_source: boolean
+  source_type: 'official' | 'third_party'
+  document_type: string | null
+  jurisdiction: string | null
+  publication_date: string | null
+  effective_date: string | null
+  relevant_sections: string[]
+  citation: string | null
+  summary: string | null
+}
+
+/** A single judgment found by `indian_case_search` (via Indian Kanoon). */
+export type IndianCase = {
+  case_name: string | null
+  court: string | null
+  citation: string | null
+  date: string | null
+  summary: string | null
+  relevance: string | null
+  url: string | null
+  source_label: string | null
+  source_type: string | null
+}
+
+/** A single prioritized compliance issue from `legal_issue_register`. */
+export type LegalIssue = {
+  title: string
+  category: string | null
+  basis: 'source' | 'user_concern' | 'inference'
+  grounded_in: string[]
+  explanation: string
+  mitigation: string | null
+  likelihood: number
+  severity: number
+  urgency: number
+  priority_score: number
+  priority: 'critical' | 'high' | 'medium' | 'low'
+}
+
 /**
  * A single entry in a session's message log.
  *
@@ -92,6 +136,26 @@ export type StreamFrame =
   | { type: 'swot'; content: string; sections: SwotSections; summary?: string }
   | { type: 'research'; content: string }
   | { type: 'astrology'; content: string; insights: string[]; disclaimer: string }
+  | {
+      type: 'legal_research'
+      content: string
+      query: string
+      results: LegalResearchResult[]
+      disclaimer: string
+    }
+  | {
+      type: 'case_search'
+      content: string
+      query: string
+      cases: IndianCase[]
+      disclaimer: string
+    }
+  | {
+      type: 'issue_register'
+      content: string
+      issues: LegalIssue[]
+      disclaimer: string
+    }
   | { type: 'suggestions'; tools: ToolInfo[] }
   | { type: 'end' }
   | { type: 'error'; job_id: string; content: string }
