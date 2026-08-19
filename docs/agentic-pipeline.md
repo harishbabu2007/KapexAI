@@ -167,12 +167,39 @@ register(WebSearchTool())
 | `questionnaire` | `questionnaire` / `questionnaire_complete` | Multi-turn: asks up to 5 targeted questions, then folds the answers into structured business context (slide UI in the frontend) | — |
 | `swot` | `swot` | Generates a SWOT analysis as structured sections | yes (`requires_context`) |
 | `web_search` | `research` | Live web research via a Tavily-powered react agent | yes (`requires_context`) |
+| `indian_legal_search` | `legal_research` | Discovers official Indian regulatory sources (Tavily over the `worker/helpers/indian_sources.py` domain allowlist) | no |
+| `indian_case_search` | `case_search` | Indian Kanoon case-law search (needs `INDIANKANOON_API_TOKEN`) | no |
+| `legal_issue_register` | `issue_register` | Deterministically scored Indian compliance issue register | no |
 
 Every tool's `run(state)` has access to `state["messages"]` — the message log —
 so it can use both the collected business context (`business_context`) and the
 conversation transcript (`format_transcript`) alongside the current request.
 `SwotTool` interpolates both into its prompt template; `WebSearchTool` builds its
 react agent's system prompt per request from the same two sources.
+
+### Tool API tokens
+
+- `TAVILY_API_KEY` — used by `web_search` and `indian_legal_search` (Tavily).
+- `INDIANKANOON_API_TOKEN` — used by `indian_case_search` to query the Indian
+  Kanoon API (https://indiankanoon.org/, token-based auth).
+
+Both are read by the **worker**, the only service that executes tool calls
+(the backend only pushes jobs onto the Redis queue). They are loaded from the
+**root `.env`** file at startup — `worker/main.py` and every tool module call
+`load_dotenv(<repo-root>/.env)` — so add them there, e.g.:
+
+```bash
+INDIANKANOON_API_TOKEN="your-real-indian-kanoon-token"
+```
+
+`.env.example` documents both variables. **Never commit a real token** — `.env`
+is gitignored and anything committed (e.g. into `.env.example`) must be a
+placeholder. When `INDIANKANOON_API_TOKEN` is missing the tool still responds
+gracefully instead of failing the job: it emits a `missing_credentials`
+message ("Sorry, this tool is not configured yet. …"), which the frontend
+renders as a plain markdown reply. A wrong token surfaces a `tool_error`
+message. Adding the token to the *frontend* environment has no effect — the
+frontend never holds or sends these tokens.
 
 ## Message formats
 
@@ -231,6 +258,43 @@ bullets, ending with a short **"Next steps"** section that poses **2-3 specific
 follow-up questions** to the user (e.g. about their competitors, target
 demographics, or pricing) so the conversation keeps moving after the result.
 
+### Indian legal search (`agent: "TOOL"`)
+
+| role | `type` | extra fields |
+|---|---|---|
+| USER | `legal_request` | `content` |
+| ASSISTANT | `legal_research` | `content`, `query`, `results: [{title, source_url, source_type, authority, document_type, jurisdiction, publication_date, effective_date, relevant_sections, summary, citation}]`, `disclaimer` |
+
+Results are grounded in Python against the allowlist in
+`worker/helpers/indian_sources.py`: `source_url` is only ever a URL that was
+actually retrieved, `source_type` (`official`/`third_party`) and `authority`
+come from the domain allowlist, and official results are listed first.
+
+### Indian case search (`agent: "TOOL"`)
+
+| role | `type` | extra fields |
+|---|---|---|
+| USER | `case_search_request` | `content` |
+| ASSISTANT | `case_search` | `content`, `query`, `cases: [{case_name, url, court, date, summary, citation}]`, `disclaimer` |
+
+`sourced from Indian Kanoon` — a third-party database, never presented as an
+official court record.
+
+### Issue register (`agent: "TOOL"`)
+
+| role | `type` | extra fields |
+|---|---|---|
+| USER | `issue_register_request` | `content` |
+| ASSISTANT | `issue_register` | `content`, `issues: [{title, basis, grounded_in, explanation, mitigation, likelihood, severity, urgency, priority_score, priority}]`, `disclaimer` |
+
+Priorities are recomputed deterministically from `likelihood × severity ×
+urgency` (critical/high/medium/low); likelihood/severity/urgency from the LLM
+are clamped to 1–5.
+
+Any of the three tools may instead emit an ASSISTANT entry of type
+`missing_credentials` (when an API token is not configured — see "Tool API
+tokens") or `tool_error` (when the upstream service fails).
+
 ## Streaming protocol
 
 Each node publishes JSON frames to the pub/sub channel `stream:{session_id}`
@@ -244,6 +308,9 @@ Each node publishes JSON frames to the pub/sub channel `stream:{session_id}`
 | `questionnaire_complete` | `content`, `context` | Acknowledges the collected answers |
 | `swot` | `content`, `sections`, `summary` | SWOT analysis result |
 | `research` | `content` | Web search result |
+| `legal_research` | `content`, `query`, `results`, `disclaimer` | Indian regulatory search result |
+| `case_search` | `content`, `query`, `cases`, `disclaimer` | Indian Kanoon case-law search result |
+| `issue_register` | `content`, `issues`, `disclaimer` | Compliance issue register result |
 | `suggestions` | `tools: [{name, description, example, suggestion}]` | "wanna try this next?" — the user can pick one to trigger a tool |
 | `end` | — | Signals the turn is finished |
 | `error` | `job_id`, `content` | The job failed; the session is marked `FAILED` |
