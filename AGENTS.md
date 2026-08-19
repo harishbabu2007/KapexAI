@@ -123,7 +123,7 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 | `worker/tools/` | Plug-and-play tools: `base.py`, `registry.py`, `questionnaire_tool.py`, `swot_tool.py`, `web_search_tool.py`, `legal_tools.py` (`indian_legal_search`, `indian_case_search`, `legal_issue_register`) |
 | `worker/prompts/` | LLM prompt templates per agent/tool (`router.py`, `chat.py`, `questionnaire.py`, `legal.py`) |
 | `worker/tools/tavily_search.py` | Tavily search tool used by `web_search_tool` |
-| `worker/tests/` | `test_chat_tools.py` (queue/pub-sub, chat, tool, questionnaire, state-rebuild tests), `test_legal_tools.py` (30 legal-tool tests incl. real E2E flows), `test_questionnaire_idea.py` (deterministic `_is_real_idea` guard tests) |
+| `worker/tests/` | `test_chat_tools.py` (queue/pub-sub, chat, tool, questionnaire, state-rebuild tests), `test_legal_tools.py` (30 legal-tool tests incl. real E2E flows), `test_questionnaire_idea.py` (deterministic `_is_real_idea` guard tests), `test_cached_http.py` (TTL-cached HTTP unit tests) |
 | `backend/tests/` | `test_main.py`, `test_jwt_utils.py`, `test_auth.py`, `test_middleware.py`, `test_db_utils.py` |
 | `frontend/src/lib/api.ts` | Typed HTTP client (`request`, `ApiError`, `wsUrl`, auth/session/waitlist/profile calls) |
 | `frontend/src/lib/auth.tsx` | AuthProvider — Google sign-in, `localStorage` session persistence, 401-only clearing, `profileEmpty` state + `markProfileFilled` |
