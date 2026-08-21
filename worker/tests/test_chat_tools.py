@@ -20,6 +20,7 @@ from worker.helpers.messages import (
     questionnaire_pending,
 )
 from worker.helpers.persistence import add_message, build_state_from_db
+from worker.tools.indian_finance_tool import IndianFinanceTool
 from worker.tools.questionnaire_tool import QuestionnaireTool
 from worker.tools.swot_tool import SwotTool
 from worker.tools.web_search_tool import WebSearchTool

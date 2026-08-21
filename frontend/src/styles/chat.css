@@ -138,6 +138,18 @@
 .astrology-card .markdown { margin-bottom: 2px; }
 .astrology-disclaimer { margin-top: 12px; padding-top: 9px; border-top: 1px dashed rgba(38, 34, 61, .18); font-size: 12.5px; line-height: 1.5; color: #8f89a8; }
 
+/* ── Indian finance calculator ────────────────────────────── */
+.indian-finance-card .finance-type { display: inline-block; font-weight: 600; font-size: 14px; color: #26223d; background: rgba(255, 147, 111, .14); border: 1px solid rgba(255, 147, 111, .35); border-radius: 999px; padding: 3px 12px; margin-bottom: 8px; }
+.indian-finance-card .finance-summary { margin: 0 0 4px; font-weight: 600; color: #26223d; }
+.finance-result { margin: 6px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.finance-row { display: flex; gap: 10px; font-size: 15.5px; }
+.finance-row dt { font-weight: 600; color: #26223d; min-width: 170px; flex-shrink: 0; }
+.finance-row dd { margin: 0; color: #4b4557; }
+.finance-nested { display: flex; flex-direction: column; gap: 3px; padding-left: 14px; border-left: 2px solid rgba(255, 147, 111, .3); }
+.finance-nested .finance-row dt { min-width: 150px; }
+.finance-caution { margin: 12px 0 0; padding: 10px 13px; border-radius: 10px; background: #f6ece0; border: 1px solid rgba(179, 84, 47, .3); color: #8a4b21; font-size: 14.5px; line-height: 1.5; }
+.finance-explanation { margin: 12px 0 0; color: #5a5266; font-size: 15px; line-height: 1.55; }
+
 /* ── Typing indicator ─────────────────────────────────────── */
 .typing-indicator { display: flex; gap: 5px; align-items: center; padding: 14px 16px; background: #fffdf8; border: 1px solid rgba(38, 34, 61, .1); border-radius: 5px 16px 16px 16px; }
 .typing-indicator span { width: 7px; height: 7px; border-radius: 50%; background: #ff936f; animation: kapex-bounce 1.2s infinite ease-in-out; }

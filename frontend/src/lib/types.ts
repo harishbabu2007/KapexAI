@@ -92,6 +92,12 @@ export type StreamFrame =
   | { type: 'swot'; content: string; sections: SwotSections; summary?: string }
   | { type: 'research'; content: string }
   | { type: 'astrology'; content: string; insights: string[]; disclaimer: string }
+  | {
+      type: 'indian_finance'
+      content: string
+      calculation_type: string
+      result: Record<string, unknown>
+    }
   | { type: 'suggestions'; tools: ToolInfo[] }
   | { type: 'end' }
   | { type: 'error'; job_id: string; content: string }
