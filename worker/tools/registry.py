@@ -5,6 +5,8 @@ from worker.tools.legal_tools import (
     IndianLegalSearchTool,
     LegalIssueRegisterTool,
 )
+from worker.tools.finance_tool import FinanceTool
+from worker.tools.indian_finance_tool import IndianFinanceTool
 from worker.tools.questionnaire_tool import QuestionnaireTool
 from worker.tools.swot_tool import SwotTool
 from worker.tools.web_search_tool import WebSearchTool
@@ -19,10 +21,12 @@ def register(tool: Tool) -> None:
 register(QuestionnaireTool())
 register(SwotTool())
 register(WebSearchTool())
+register(FinanceTool())
 register(AstrologyTool())
 register(IndianLegalSearchTool())
 register(IndianCaseSearchTool())
 register(LegalIssueRegisterTool())
+register(IndianFinanceTool())
 
 
 def get_tool(name: str) -> Tool | None:

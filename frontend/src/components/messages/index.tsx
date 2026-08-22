@@ -3,6 +3,7 @@ import { AstrologyCard } from './AstrologyCard'
 import { CaseSearchCard } from './CaseSearchCard'
 import { IssueRegisterCard } from './IssueRegisterCard'
 import { LegalResearchCard } from './LegalResearchCard'
+import { IndianFinanceCard } from './IndianFinanceCard'
 import { MarkdownMessage } from './MarkdownMessage'
 import { QuestionnaireCard } from './QuestionnaireCard'
 import { QuestionnaireCompleteCard } from './QuestionnaireCompleteCard'
@@ -33,6 +34,7 @@ const registry: Record<string, ComponentType<MessageComponentProps>> = {
   legal_research: LegalResearchCard,
   case_search: CaseSearchCard,
   issue_register: IssueRegisterCard,
+  indian_finance: IndianFinanceCard,
 }
 
 export function MessageContent(props: MessageComponentProps) {

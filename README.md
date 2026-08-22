@@ -29,6 +29,10 @@ Currently available:
 - **Web search** - researches a topic, a competitor, or a market on the web.
 - **SWOT** - produces a SWOT (strengths, weaknesses, opportunities, threats)
   analysis.
+- **Finance** - financial calculations and analysis: returns, valuation, risk,
+  equity metrics, and SEC public-company filing lookups. Powered by an internal
+  agent over 109 calculator functions (see `worker/tools/finance_tool.py`);
+  SEC lookups need `SEC_USER_AGENT` set.
 
 ## Getting started
 

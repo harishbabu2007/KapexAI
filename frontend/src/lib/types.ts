@@ -155,6 +155,10 @@ export type StreamFrame =
       content: string
       issues: LegalIssue[]
       disclaimer: string
+      type: 'indian_finance'
+      content: string
+      calculation_type: string
+      result: Record<string, unknown>
     }
   | { type: 'suggestions'; tools: ToolInfo[] }
   | { type: 'end' }
