@@ -253,9 +253,6 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./frontend
 
     steps:
       - name: Checkout repository
@@ -269,10 +266,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: cd frontend && npm ci
 
       - name: Type check and build
-        run: npm run build
+        run: cd frontend && npm run build
 
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
@@ -283,6 +280,7 @@ jobs:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
+          cd frontend
           vercel --prod --token=$VERCEL_TOKEN --scope=$VERCEL_ORG_ID --yes
 ```
 
