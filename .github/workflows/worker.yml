@@ -52,4 +52,4 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway up --service kapex-worker --detach
+          railway up --service worker --detach

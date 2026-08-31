@@ -34,4 +34,4 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
           cd frontend
-          vercel --prod --token=$VERCEL_TOKEN --scope=$VERCEL_ORG_ID --yes
+          vercel --prod --token=$VERCEL_TOKEN --scope=$VERCEL_ORG_ID --cwd=. --yes
