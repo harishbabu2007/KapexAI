@@ -55,8 +55,14 @@ jobs:
         run: |
           railway up --service backend --detach
 
+      - name: Wait for deployment
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          sleep 30
+
       - name: Run database migrations
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway run --service backend uv run prisma migrate deploy --schema=services/database/schema.prisma
+          railway run --service backend "sh -c 'cd /app && .venv/bin/prisma migrate deploy --schema=services/database/schema.prisma'"
