@@ -10,7 +10,7 @@ restartPolicyMaxRetries = 3
 [[services]]
 name = "backend"
 rootDirectory = "/"
-buildCommand = "uv sync --all-packages && uv run prisma generate --schema=services/database/schema.prisma && uv run prisma py fetch"
+buildCommand = "uv sync --all-packages && uv run prisma generate --schema=services/database/schema.prisma && uv run prisma py fetch && uv run prisma migrate deploy --schema=services/database/schema.prisma"
 startCommand = "uv run --package backend uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/health"
 

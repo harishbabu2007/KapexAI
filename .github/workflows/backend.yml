@@ -54,15 +54,3 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           railway up --service backend --detach
-
-      - name: Wait for deployment
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          sleep 45
-
-      - name: Fetch Prisma query engine & run migrations
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          npx railway run --service backend ".venv/bin/uv run prisma py fetch && .venv/bin/uv run prisma migrate deploy --schema=services/database/schema.prisma"
