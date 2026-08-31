@@ -61,6 +61,12 @@ jobs:
         run: |
           sleep 30
 
+      - name: Fetch Prisma query engine on Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway run --service backend "sh -c 'cd /app && uv run prisma py fetch'"
+
       - name: Run database migrations
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
