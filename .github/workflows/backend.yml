@@ -65,4 +65,4 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway run --service backend ".venv/bin/uv run prisma py fetch && .venv/bin/uv run prisma migrate deploy --schema=services/database/schema.prisma"
+          npx railway run --service backend ".venv/bin/uv run prisma py fetch && .venv/bin/uv run prisma migrate deploy --schema=services/database/schema.prisma"

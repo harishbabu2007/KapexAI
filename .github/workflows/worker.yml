@@ -64,4 +64,4 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway run --service worker ".venv/bin/uv run prisma py fetch"
+          npx railway run --service worker ".venv/bin/uv run prisma py fetch"
