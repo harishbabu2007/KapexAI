@@ -24,14 +24,9 @@ jobs:
       - name: Type check and build
         run: cd frontend && npm run build
 
-      - name: Install Vercel CLI
-        run: npm install -g vercel@latest
-
       - name: Deploy to Vercel
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: |
-          cd frontend
-          vercel deploy --prod --token=$VERCEL_TOKEN --scope=$VERCEL_ORG_ID --yes
+        run: npx vercel@latest deploy --prod --yes

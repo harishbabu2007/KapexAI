@@ -58,10 +58,10 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          sleep 30
+          sleep 45
 
-      - name: Fetch Prisma query engine on Railway
+      - name: Fetch Prisma query engine
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway run --service worker "sh -c 'cd /app && uv run prisma py fetch'"
+          railway run --service worker "uv run prisma py fetch"
