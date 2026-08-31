@@ -242,18 +242,12 @@ Create `.github/workflows/` directory with three workflow files.
 
 ### 5.1 Frontend Workflow (`.github/workflows/frontend.yml`)
 
+**Manual only** — runs when you click "Run workflow" in GitHub Actions.
+
 ```yaml
 name: Frontend CI/CD
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'frontend/**'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'frontend/**'
   workflow_dispatch:
 
 jobs:
@@ -277,12 +271,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type check
-        run: npm run build --if-present
-        # Note: `npm run build` runs `tsc -b && vite build`
+      - name: Type check and build
+        run: npm run build
 
       - name: Deploy to Vercel
-        if: github.ref == 'refs/heads/main'
         uses: amondnet/vercel-action@v25
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
@@ -294,24 +286,12 @@ jobs:
 
 ### 5.2 Backend Workflow (`.github/workflows/backend.yml`)
 
+**Manual only** — runs when you click "Run workflow" in GitHub Actions.
+
 ```yaml
 name: Backend CI/CD
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - 'services/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - 'services/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
   workflow_dispatch:
 
 jobs:
@@ -353,7 +333,6 @@ jobs:
 
   deploy:
     needs: test
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -367,24 +346,12 @@ jobs:
 
 ### 5.3 Worker Workflow (`.github/workflows/worker.yml`)
 
+**Manual only** — runs when you click "Run workflow" in GitHub Actions.
+
 ```yaml
 name: Worker CI/CD
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'worker/**'
-      - 'services/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'worker/**'
-      - 'services/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
   workflow_dispatch:
 
 jobs:
@@ -425,7 +392,6 @@ jobs:
 
   deploy:
     needs: test
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

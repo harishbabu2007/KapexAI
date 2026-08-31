@@ -1,20 +1,6 @@
 name: Backend CI/CD
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - 'services/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - 'services/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
   workflow_dispatch:
 
 jobs:
@@ -56,7 +42,6 @@ jobs:
 
   deploy:
     needs: test
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
