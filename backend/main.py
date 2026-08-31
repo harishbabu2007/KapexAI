@@ -333,7 +333,10 @@ async def websocket_stream(websocket: WebSocket, session_id: str):
     # channel — close right away instead of holding an idle connection open.
     if not await redis.get(PENDING_KEY.format(session_id=session_id)):
         await _safe_send(websocket, {"type": "end"})
-        await websocket.close()
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
         return
 
     pubsub = redis.pubsub()
