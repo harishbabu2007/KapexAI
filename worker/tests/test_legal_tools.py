@@ -1,5 +1,6 @@
 import json
 import time
+import pytest
 from types import SimpleNamespace
 
 from conftest import run as _run
@@ -883,10 +884,14 @@ def test_legal_search_flow_streams_and_persists(monkeypatch):
             assert {t["name"] for t in events[1]["tools"]} == {
                 "swot",
                 "web_search",
+                "economics",
+                "foresight",
+                "finance",
                 "astrology",
                 "indian_legal_search",
                 "indian_case_search",
                 "legal_issue_register",
+                "indian_finance",
             }
             assert events[2]["type"] == "end"
 

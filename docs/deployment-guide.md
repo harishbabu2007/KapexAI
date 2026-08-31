@@ -274,14 +274,16 @@ jobs:
       - name: Type check and build
         run: npm run build
 
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
       - name: Deploy to Vercel
-        uses: amondnet/vercel-action@v25
-        with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prod'
-          working-directory: ./frontend
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          vercel --prod --token=$VERCEL_TOKEN --scope=$VERCEL_ORG_ID --yes
 ```
 
 ### 5.2 Backend Workflow (`.github/workflows/backend.yml`)
@@ -337,11 +339,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
       - name: Deploy to Railway
-        uses: railwayapp/railway-deploy@v1
-        with:
-          token: ${{ secrets.RAILWAY_TOKEN }}
-          service: kapex-backend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up --service kapex-backend --detach
 ```
 
 ### 5.3 Worker Workflow (`.github/workflows/worker.yml`)

@@ -1,5 +1,6 @@
 import json
 import time
+import pytest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -148,6 +149,7 @@ def test_chat_flow_persists_and_streams(monkeypatch):
                 "indian_legal_search",
                 "indian_case_search",
                 "legal_issue_register",
+                "indian_finance",
             }
 
             msgs = await db.message.find_many(where={"sessionId": sid})

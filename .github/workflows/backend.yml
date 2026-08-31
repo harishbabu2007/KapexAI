@@ -46,8 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
       - name: Deploy to Railway
-        uses: railwayapp/railway-deploy@v1
-        with:
-          token: ${{ secrets.RAILWAY_TOKEN }}
-          service: kapex-backend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up --service kapex-backend --detach
