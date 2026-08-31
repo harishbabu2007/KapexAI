@@ -19,10 +19,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: cd frontend && npm ci
+        run: npm ci
 
       - name: Type check and build
-        run: cd frontend && npm run build
+        run: npm run build
 
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
