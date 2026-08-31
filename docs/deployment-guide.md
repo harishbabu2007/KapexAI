@@ -2,11 +2,13 @@
 
 This guide covers deploying the KapexAI application for **free** using:
 - **Frontend**: Vercel (free tier)
-- **Backend**: Railway (free tier) or Render (free tier)
-- **Worker**: Same platform as backend (Railway/Render)
+- **Backend**: Railway (free tier - $5/month credit)
+- **Worker**: Railway (same project, background worker)
 - **Database**: Existing PostgreSQL (Prisma)
 - **Redis**: Existing Redis Cloud (free tier)
 - **CI/CD**: GitHub Actions (3 workflows)
+
+> **Why Railway over Render?** Railway's free tier includes background workers that don't spin down, while Render's free background workers spin down after inactivity. Railway's $5/month credit covers both services easily.
 
 ---
 
@@ -132,7 +134,7 @@ Railway offers $5/month free credit (enough for small apps).
 
 - **Name**: `kapex-backend`
 - **Root Directory**: `/` (monorepo root)
-- **Build Command**: `uv sync --all-packages && make generate`
+- **Build Command**: `uv sync --all-packages && uv run prisma generate --schema=services/database/schema.prisma && uv run prisma py fetch`
 - **Start Command**: `uv run --package backend uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
 - **Environment Variables**: Add all backend `.env` variables
 - **Port**: Railway auto-assigns `$PORT`
@@ -141,7 +143,7 @@ Railway offers $5/month free credit (enough for small apps).
 
 - **Name**: `kapex-worker`
 - **Root Directory**: `/`
-- **Build Command**: `uv sync --all-packages && make generate`
+- **Build Command**: `uv sync --all-packages && uv run prisma generate --schema=services/database/schema.prisma && uv run prisma py fetch`
 - **Start Command**: `uv run --package worker python -m worker.main`
 - **Environment Variables**: Same as backend
 - **No port needed** (background worker)
@@ -163,14 +165,14 @@ restartPolicyMaxRetries = 3
 [[services]]
 name = "backend"
 rootDirectory = "/"
-buildCommand = "uv sync --all-packages && make generate"
+buildCommand = "uv sync --all-packages && uv run prisma generate --schema=services/database/schema.prisma && uv run prisma py fetch"
 startCommand = "uv run --package backend uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/health"
 
 [[services]]
 name = "worker"
 rootDirectory = "/"
-buildCommand = "uv sync --all-packages && make generate"
+buildCommand = "uv sync --all-packages && uv run prisma generate --schema=services/database/schema.prisma && uv run prisma py fetch"
 startCommand = "uv run --package worker python -m worker.main"
 ```
 
