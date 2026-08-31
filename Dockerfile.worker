@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+WORKDIR /app
+
+# Copy dependency files
+COPY pyproject.toml uv.lock ./
+COPY services/database/pyproject.toml ./services/database/
+COPY services/redis-service/pyproject.toml ./services/redis-service/
+COPY backend/pyproject.toml ./backend/
+COPY worker/pyproject.toml ./worker/
+
+# Install dependencies
+RUN uv sync --all-packages --no-dev
+
+# Copy source code
+COPY . .
+
+# Generate Prisma client and fetch binary
+RUN uv run prisma generate --schema=services/database/schema.prisma && \
+    uv run prisma py fetch
+
+# Start worker
+CMD ["uv", "run", "--package", "worker", "python", "-m", "worker.main"]
