@@ -30,10 +30,10 @@ RUN uv run prisma generate --schema=services/database/schema.prisma
 RUN uv run prisma py fetch
 
 # Run migrations
-RUN uv run prisma migrate deploy --schema=services/database/schema.prisma
+# RUN uv run prisma migrate deploy --schema=services/database/schema.prisma
 
 # Expose porthey
 EXPOSE 8000
 
 # Start backend
-CMD ["uv", "run", "--package", "backend", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uv run prisma migrate deploy --schema=services/database/schema.prisma && exec uv run --package backend uvicorn backend.main:app --host 0.0.0.0 --port $PORT"]
