@@ -66,10 +66,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KapexAI Backend", lifespan=lifespan)
 
-# CORS middleware to allow requests from localhost:3000 (frontend dev server)
+# CORS middleware - reads from env var for production flexibility
+import os
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[o.strip() for o in cors_origins],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

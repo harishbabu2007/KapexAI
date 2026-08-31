@@ -180,15 +180,29 @@ Render free tier: 750 hours/month, spins down after 15 min inactivity.
 
 1. Go to [Render Dashboard](https://dashboard.render.com)
 2. **New Web Service** (Backend):
-   - **Build Command**: `uv sync --all-packages && make generate`
+   - **Build Command**: 
+     ```bash
+     pip install uv && uv sync --all-packages && uv run prisma generate --schema=services/database/schema.prisma && uv run prisma py fetch
+     ```
    - **Start Command**: `uv run --package backend uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
    - **Environment**: Python 3.12+
+   - **Root Directory**: Leave empty (repo root)
    - Add all env vars
 
 3. **New Background Worker** (Worker):
-   - **Build Command**: `uv sync --all-packages && make generate`
+   - **Build Command**: 
+     ```bash
+     pip install uv && uv sync --all-packages && uv run prisma generate --schema=services/database/schema.prisma && uv run prisma py fetch
+     ```
    - **Start Command**: `uv run --package worker python -m worker.main`
+   - **Root Directory**: Leave empty (repo root)
+   - **Service Type**: Background Worker (not Web Service!)
    - Add same env vars
+
+**Important**: 
+- Render doesn't have `make` pre-installed. Use the direct `uv run prisma generate` command instead of `make generate`.
+- **Must run `prisma py fetch`** after generate to download the query engine binary.
+- **Worker must be a "Background Worker" service type**, not a "Web Service" (web services require port binding).
 
 ---
 
@@ -319,7 +333,10 @@ jobs:
         run: uv sync --all-packages
 
       - name: Generate Prisma client
-        run: make generate
+        run: uv run prisma generate --schema=services/database/schema.prisma
+
+      - name: Fetch Prisma query engine
+        run: uv run prisma py fetch
 
       - name: Run tests
         run: .venv/bin/python -m pytest backend/tests/ -q
@@ -389,7 +406,10 @@ jobs:
         run: uv sync --all-packages
 
       - name: Generate Prisma client
-        run: make generate
+        run: uv run prisma generate --schema=services/database/schema.prisma
+
+      - name: Fetch Prisma query engine
+        run: uv run prisma py fetch
 
       - name: Run worker tests
         run: PYTHONPATH=. uv run --package worker pytest worker/tests/ -v
@@ -448,10 +468,10 @@ Run migrations after deploying backend:
 # Option 1: Railway CLI
 railway login
 railway link
-railway run make migrate
+railway run uv run prisma migrate deploy --schema=services/database/schema.prisma
 
 # Option 2: Local with production DATABASE_URL
-DATABASE_URL="your-production-url" make migrate
+DATABASE_URL="your-production-url" uv run prisma migrate deploy --schema=services/database/schema.prisma
 ```
 
 ---
@@ -572,19 +592,24 @@ After initial deployment:
 
 ```bash
 # Local development
-make install           # uv sync
-make generate          # Prisma generate
-make migrate           # Prisma migrate
-make dev-backend       # Backend on :8000
-make dev-worker        # Worker
+make install                    # uv sync
+make generate                   # Prisma generate (local)
+make migrate                    # Prisma migrate (local)
+make dev-backend                # Backend on :8000
+make dev-worker                 # Worker
+
+# Direct Prisma commands (for CI/CD, Render, Railway)
+uv run prisma generate --schema=services/database/schema.prisma
+uv run prisma py fetch
+uv run prisma migrate deploy --schema=services/database/schema.prisma
 
 # Frontend
 cd frontend && npm run dev      # :3000
 cd frontend && npm run build    # Production build
 
 # Deploy
-vercel --prod                  # Frontend
-railway up                     # Backend + Worker (if using Railway CLI)
+vercel --prod                   # Frontend
+railway up                      # Backend + Worker (if using Railway CLI)
 ```
 
 ---
