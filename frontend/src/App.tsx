@@ -4,6 +4,8 @@ import { BusinessProfilePage } from './pages/BusinessProfilePage'
 import { ChatPage } from './pages/ChatPage'
 import { LandingPage } from './pages/LandingPage'
 import { useAuth } from './lib/auth'
+import { Analytics } from '@vercel/analytics/react'
+import React from 'react'
 
 /**
  * The landing route. Fresh signups (and returning users who never saved a
@@ -27,13 +29,17 @@ function HomeRedirect() {
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/" element={<HomeRedirect />} />
-      <Route element={<ProtectedRoute />}>
-        <Route path="/chat" element={<ChatPage />} />
-        <Route path="/business-profile" element={<BusinessProfilePage />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <React.Fragment>
+      <Analytics />
+      <Routes>
+        <Route path="/" element={<HomeRedirect />} />
+        <Route element={<ProtectedRoute />}>
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/business-profile" element={<BusinessProfilePage />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </React.Fragment>
+    
   )
 }
