@@ -363,7 +363,11 @@ async def websocket_stream(websocket: WebSocket, session_id: str):
     finally:
         await pubsub.unsubscribe(f"stream:{session_id}")
         await pubsub.close()
-    await websocket.close()
+
+    try:
+        await websocket.close()
+    except RuntimeError:
+        pass
 
 
 async def _safe_send(websocket: WebSocket, data: dict) -> bool:
