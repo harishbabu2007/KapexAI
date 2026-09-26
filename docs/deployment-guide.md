@@ -65,7 +65,55 @@ GOOGLE_API_KEY="your-google-api-key"
 TAVILY_API_KEY="your-tavily-api-key"
 INDIANKANOON_API_TOKEN="your-indian-kanoon-api-token"
 SEC_USER_AGENT="KapexAI contact@yourdomain.com"
+
+# Feedback → Google Sheets (optional, off by default)
+FEEDBACK_ENABLED="false"
+FEEDBACK_SPREADSHEET_ID="your-google-spreadsheet-id"
+FEEDBACK_SHEET_NAME="Feedback"
+# Use exactly one credential option — see "Feedback (optional)" below.
+FEEDBACK_GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account", ...}'
 ```
+
+### Feedback (optional)
+
+Feedback is **off unless you turn it on**, and it needs no LLM key, no worker and
+no database migration. To enable it, add the five variables above to the backend
+service (not the worker) and restart it. Full detail, including the spreadsheet
+headers, is in [`docs/feedback.md`](feedback.md); the deployment-specific points:
+
+**1. Credentials — pick one option.**
+
+| Option | Variable | When to use |
+|---|---|---|
+| Key file | `FEEDBACK_GOOGLE_APPLICATION_CREDENTIALS` | Only if you can mount a file into the container. The repo's `.dockerignore` keeps `*.env` and service-account JSON out of the build context, so a file present at build time will **not** be in the image — you must mount it at runtime. |
+| Inline JSON | `FEEDBACK_GOOGLE_SERVICE_ACCOUNT_JSON` | **Recommended for deployment.** Paste the same key as a single-line JSON string. No file needs to exist in the image. |
+
+Whichever you choose, mark it as a **secret** in your platform's variable
+settings so it is not visible in build logs or to other services. The inline
+JSON must keep its newlines escaped as `\n` inside `private_key`; a key pasted
+with real newlines will not parse and the endpoint will return `503`.
+
+**2. Google Cloud side.** The Sheets API must be enabled, and the service
+account's `client_email` must be an **Editor** on the target spreadsheet —
+otherwise every append fails with `403`.
+
+**3. The spreadsheet and tab already exist.** Create the tab named in
+`FEEDBACK_SHEET_NAME` and put the ten headers in row 1, columns A–J. The
+deployment never creates the sheet or the tab, and never writes a header row.
+
+**4. Frontend.** Nothing. The button appears based on the `feedback_enabled`
+flag that `/auth/me` returns, and the frontend needs no credentials of any kind.
+
+**5. `FeedbackDev` vs `Feedback`.** Both are tabs on the *same* spreadsheet, so
+they are a way to keep test rows apart from real ones — **not** an access
+boundary. Anything with Editor access can read both. Use a separate Google Cloud
+project if you need real isolation.
+
+**6. What to expect at runtime.** Appends are best-effort: one attempt, no
+automatic retry, and an ambiguous result (`502 feedback_uncertain`) is surfaced
+to the user as "this may already be saved, resending may duplicate it". If the
+rate limiter cannot reach Redis the endpoint returns `503` and refuses the
+write; no other route is affected.
 
 ### Frontend (`.env.local` → Vercel Environment Variables)
 
@@ -463,6 +511,8 @@ DATABASE_URL="your-production-url" uv run prisma migrate deploy --schema=service
 - [ ] CORS allows Vercel domain
 - [ ] Google OAuth callback works
 - [ ] JWT tokens issued/validated
+- [ ] Feedback is **off by default**: `/auth/me` reports `feedback_enabled: false` and the Feedback button is hidden
+- [ ] Only if feedback is enabled: one row appears in the target tab, with the ten A–J headers intact, `status = new`, and `contact_email` empty unless consent was ticked. Do not send a second submission just to observe the `429` — the cooldown and duplicate-row guards are covered by the automated tests (see [`docs/feedback.md`](feedback.md))
 
 ### Worker (Railway/Render)
 - [ ] Starts without errors
@@ -527,6 +577,15 @@ make generate
 - Check Redis connection (`REDIS_URL`)
 - Verify `jobs:queue` has messages (`redis-cli LRANGE jobs:queue 0 -1`)
 - Check worker logs for errors
+
+**Feedback returns `503 feedback_disabled`**
+- `FEEDBACK_ENABLED` is unset or not a truthy value (`true`/`1`/`yes`/`on`)
+- Or the spreadsheet id, sheet name, or credential source is missing/unusable — a config problem is reported as "disabled" on purpose, so it can never break startup
+- See [`docs/feedback.md`](feedback.md) for the full troubleshooting table
+
+**Feedback returns `502` (failed or uncertain)**
+- `failed`: the service account is probably not an Editor on the spreadsheet, or the inline JSON is malformed
+- `uncertain`: Google timed out or returned `5xx`. **Check the sheet before the user resubmits** — the row may already be there and a retry would duplicate it. Appends are never retried automatically
 
 **Google OAuth "redirect_uri_mismatch"**
 - Exact match in Google Console: `https://your-backend.com/auth/google/callback`

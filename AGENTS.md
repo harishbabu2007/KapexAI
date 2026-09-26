@@ -35,7 +35,7 @@ Frontend deps go in `frontend/package.json` via `npm install <pkg>`.
 - Run worker tests: `PYTHONPATH=. uv run --package worker pytest worker/tests/ -v` (worker tests hit real DB + Redis)
 - A bare `uv sync` only installs the root package's deps (backend's `python-jose`, LangGraph, etc. end up missing). To rebuild the full workspace env run `uv sync --all-packages` (then `make generate` to regenerate the Prisma client).
 - Test files: `backend/tests/test_*.py`, `worker/tests/test_*.py`
-- Frontend: no test framework; verify with `npm run build` (runs `tsc -b`)
+- Frontend: no test framework installed; `npm test` in `frontend/` runs the Node built-in runner over `tests/` (`--experimental-strip-types`), and `npm run build` runs `tsc -b`
 - `worker/tests/conftest.py` owns the **single** event loop + the session-scoped DB/Redis `services` fixture. All worker test modules must use `from conftest import run as _run` — the `redis_service` client binds connections to whichever loop created them, so a second loop in the same pytest process (e.g. a second test file) collides with the first
 
 ## Services
@@ -61,17 +61,18 @@ Schema models: `User`, `Session`, `Message` (with `Role`, `Agent`, `Status` enum
 - Backend connects Redis in its `lifespan` alongside the DB
 - Supports pub/sub — used by the WebSocket endpoint for real-time streaming
 
-Full docs at `docs/agentic-pipeline.md` (router/tools/message log), `docs/services.md`, `docs/queue-and-streaming.md` (jobs/streaming), and `docs/tab-switching.md` (single-tab lock + state resume).
+Full docs at `docs/agentic-pipeline.md` (router/tools/message log), `docs/services.md`, `docs/queue-and-streaming.md` (jobs/streaming), `docs/tab-switching.md` (single-tab lock + state resume), and `docs/feedback.md` (feedback → Google Sheets).
 
 ## Frontend
 
 Vite + React (TypeScript), deps managed via `frontend/package.json` (`npm install`). Key libs: `react-router-dom` (routing), `@react-oauth/google` (Google popup sign-in), `react-markdown` + `remark-gfm` (assistant messages).
 
 - Routes (`src/App.tsx`): `/` (landing), `/chat` (protected), `/business-profile` (protected, first-fill profile), `*` → `/`
-- Auth: `src/lib/auth.tsx` AuthProvider stores the JWT + user in `localStorage` (persists across tabs); restores/validates on load via `GET /auth/me` and only drops the session on a 401. Tracks `profileEmpty` so authenticated users are redirected past the landing page: empty profile → `/business-profile`, filled → `/chat` (`HomeRedirect` in `App.tsx`)
-- API client: `src/lib/api.ts` (typed `fetch` wrapper, `ApiError` with `.status`, `wsUrl()` for the stream socket, `getBusinessProfile`/`updateBusinessProfile` for the profile page)
+- Auth: `src/lib/auth.tsx` AuthProvider stores the JWT + user in `localStorage` (persists across tabs); restores/validates on load via `GET /auth/me` and only drops the session on a 401. Tracks `profileEmpty` so authenticated users are redirected past the landing page: empty profile → `/business-profile`, filled → `/chat` (`HomeRedirect` in `App.tsx`), and `feedbackEnabled` from the same response (`feedback_enabled`, defaults to false when an older backend omits it)
+- API client: `src/lib/api.ts` (typed `fetch` wrapper, `ApiError` with `.status` + raw `.body`, `wsUrl()` for the stream socket, `getBusinessProfile`/`updateBusinessProfile` for the profile page, `submitFeedback`/`describeFeedbackError` for feedback)
 - Chat state: `src/hooks/useChatSession.ts` (sessions list, active session, streaming via WebSocket, rename/delete handlers)
-- Styling: `src/styles/global.css` (landing) + `src/styles/chat.css` (workspace)
+- Feedback UI: `src/components/feedback/FeedbackDialog.tsx` (Bug / Feature request / General, required ≤2,000-char message, optional unchecked contact consent). Opened from the `Feedback` button pinned at the bottom of `Sidebar.tsx` (above the divider + profile footer, outside the scrolling list), so it works in both the empty-chat and active-chat states. On mobile the empty-chat state renders `ChatHeader` inside `.chat-empty-header` purely to get its menu toggle (hidden on desktop), since that state otherwise has no way to open the sidebar
+- Styling: `src/styles/global.css` (landing) + `src/styles/chat.css` (workspace + feedback dialog)
 - Env: `VITE_API_BASE_URL` (default `http://localhost:8000`), `VITE_GOOGLE_CLIENT_ID` (in `frontend/.env.local`)
 - Message rendering: `src/components/messages/` maps each tool's `type` to a card component — including `legal_research`/`case_search`/`issue_register` (`LegalResearchCard`, `CaseSearchCard`, `IssueRegisterCard`); unknown types fall back to plain markdown
 
@@ -102,17 +103,24 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 5. **State** — a **message log** (`messages`) is cached in Redis (`langgraph_state:{session_id}`, 24h TTL) and rebuilt from DB message history (ordered by `created_at`) via `worker/helpers/persistence.py`. Each log entry is `{role, agent, type, content, ...tool-specific fields}`.
 6. **Frontend** — the React app signs in via a Google popup (`POST /auth/google`), then `src/hooks/useChatSession.ts` drives the workspace: sessions come from `GET /get_sessions`, messages from `GET /get_messages`, and streaming from the WebSocket. Sessions can be **renamed** (`POST /rename_session`, updates `business_idea`) or **deleted** (`POST /delete_session`, removes the session + all messages + the Redis `langgraph_state` and `pending` keys) from the sidebar's per-session ⋯ menu. A fresh tab that loads a session with an in-flight job (the `pending` field from `GET /get_messages`) shows the pending bubble + typing indicator and connects to the live stream; sending another message is blocked until the current reply finishes. Incoming messages never auto-scroll the chat — the view only anchors to the bottom when the user sends a message or switches sessions.
 7. **Business profile** — each `User` has one `BusinessProfile` row (created lazily by `ensure_business_profile` on signup). The frontend `/business-profile` page collects seven fields (`your_name`, `industry`, `about_you`, `business_history`, `location`, `monthly_income`, `monthly_expenditure`) and saves them via `POST /update_business_profile`; `GET /get_business_profile` returns the raw `content` dict. On every worker job, `load_state` refetches the profile and injects a `business_profile` message-log entry via `inject_business_profile` (replaces any stale cached entry, leaving the log empty if the profile is blank), so tools/the chat agent always read fresh values. After signup and on `/auth/me`, the backend returns `profile_empty`; `HomeRedirect` sends users with an empty profile to `/business-profile` instead of `/chat`.
+8. **Feedback** — an optional feature (**off by default** via `FEEDBACK_ENABLED`) that appends one row per submission to a Google Sheet, with no LLM worker and no Prisma schema change. `POST /feedback` uses the JWT dependency, derives `user_id` (and `contact_email`, only with consent) from the authenticated user, rejects unknown body fields, sanitizes `page_path` to `/`/`/chat`/`/business-profile`, verifies ownership of an optional `session_id`, and is rate-limited by a Redis Lua script (20s cooldown + 10/hour/user, fail-closed with `503` if Redis is down). The Sheets call is **one** attempt — never auto-retried — and a timeout/5xx returns `delivery: "uncertain"` with an explicit duplicate-risk warning. `google-auth`'s blocking refresh runs via `asyncio.to_thread` inside a **shielded single-flight task** (not a lock: a thread cannot be cancelled, so releasing a lock would let a second refresh start while the first thread was still running and could hand back a stale token), both network hops are time-bounded (`TOKEN_HTTP_TIMEOUT_SECONDS=8`, `TOKEN_TIMEOUT_SECONDS=12`, `SHEETS_TIMEOUT_SECONDS=15`), and the lazily-created `httpx` client is closed in the lifespan. `/auth/me` and the popup login report `feedback_enabled` (a pure env read — auth never makes a Google call). See `docs/feedback.md`.
 
 ## Key modules
 
 | File | Description |
 |---|---|
-| `backend/main.py` | FastAPI app: `/health`, `/waitlist`, `/create_chat_session`, `/push_chat_message`, `/submit_questionnaire_answers`, `/get_sessions`, `/get_messages`, `/rename_session`, `/delete_session`, `/get_business_profile`, `/update_business_profile`, `ws/session/{session_id}`. Tracks in-flight jobs via the `pending:{session_id}` key + `PENDING` status |
+| `backend/main.py` | FastAPI app: `/health`, `/waitlist`, `/create_chat_session`, `/push_chat_message`, `/submit_questionnaire_answers`, `/get_sessions`, `/get_messages`, `/rename_session`, `/delete_session`, `/get_business_profile`, `/update_business_profile`, `/feedback`, `ws/session/{session_id}`. Tracks in-flight jobs via the `pending:{session_id}` key + `PENDING` status |
 | `backend/utils/jwt_utils.py` | JWT token creation and verification using python-jose (HS256, 7-day expiry) |
 | `backend/middleware/auth.py` | FastAPI `get_current_user` dependency — extracts Bearer token, decodes JWT, fetches user from DB |
-| `backend/routers/auth.py` | Google OAuth endpoints: `/auth/google` (popup ID token), `/auth/google/callback`, `/auth/me`. Ensures a `BusinessProfile` row on signup and returns `profile_empty` |
+| `backend/routers/auth.py` | Google OAuth endpoints: `/auth/google` (popup ID token), `/auth/google/callback`, `/auth/me`. Ensures a `BusinessProfile` row on signup and returns `profile_empty` + `feedback_enabled` |
 | `backend/utils/db_utils.py` | Backend-side Prisma helpers (`get_user`, `get_session`, `get_all_sessions`, `ensure_business_profile`, `business_profile_is_empty`) |
-| `backend/models/models.py` | Pydantic request bodies (waitlist, chat session/message, rename/delete session, business profile) |
+| `backend/models/models.py` | Pydantic request bodies (waitlist, chat session/message, rename/delete session, business profile, `FeedbackRequest`) |
+| `backend/routers/feedback.py` | `POST /feedback` — authenticated feedback submission: config gate, Redis rate limit, session ownership, consent, one Google Sheets append, honest `delivered`/`uncertain`/`failed` verdicts |
+| `backend/utils/feedback_config.py` | Env-driven `feedback_enabled`/`load_feedback_config` (path or inline-JSON credentials) + `sanitize_page_path` allowlist |
+| `backend/utils/feedback_sheets.py` | Google Sheets append client: `build_feedback_row` (A–J mapping), bounded blocking token refresh via `asyncio.to_thread` in a shielded single-flight task, one RAW/`INSERT_ROWS` append, HTTP→delivery classification, lifespan-safe client close |
+| `backend/utils/feedback_limits.py` | Redis Lua rate limiter for feedback (20s cooldown + 10/hour/user); `RateLimiterUnavailable` is fail-closed for this route only |
+| `backend/tests/test_feedback.py` | Fully mocked feedback tests (Google/Redis/DB) — auth, validation, ownership, consent, row mapping, config, rate limits, uncertain writes, lifecycle |
+
 | `worker/main.py` | Async worker loop; polls Redis queue and dispatches jobs |
 | `worker/agent.py` | LangGraph graph definition, state load/save, `process_job`; `load_state` injects the user's `business_profile` into the message log |
 | `worker/agents/` | `router_agent.py` (intent classifier), `chat_agent.py` (consultant chat) |
@@ -130,10 +138,11 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 | `worker/prompts/` | LLM prompt templates per agent/tool (`router.py`, `chat.py`, `questionnaire.py`, `legal.py`) |
 | `worker/tools/tavily_search.py` | Tavily search tool used by `web_search_tool` |
 | `worker/tests/` | `test_chat_tools.py` (queue/pub-sub, chat, tool, questionnaire, state-rebuild tests), `test_legal_tools.py` (30 legal-tool tests incl. real E2E flows), `test_questionnaire_idea.py` (deterministic `_is_real_idea` guard tests), `test_cached_http.py` (TTL-cached HTTP unit tests) |
-| `backend/tests/` | `test_main.py`, `test_jwt_utils.py`, `test_auth.py`, `test_middleware.py`, `test_db_utils.py` |
-| `frontend/src/lib/api.ts` | Typed HTTP client (`request`, `ApiError`, `wsUrl`, auth/session/waitlist/profile calls) |
-| `frontend/src/lib/auth.tsx` | AuthProvider — Google sign-in, `localStorage` session persistence, 401-only clearing, `profileEmpty` state + `markProfileFilled` |
-| `frontend/src/lib/types.ts` | Shared TS types (`SessionInfo`, `ChatMessage`, `StreamFrame`, `ToolInfo`, `BusinessProfile`) |
+| `backend/tests/` | `test_main.py`, `test_jwt_utils.py`, `test_auth.py`, `test_middleware.py`, `test_db_utils.py`, `test_feedback.py` (fully mocked — Google/Redis/DB) |
+| `frontend/src/lib/api.ts` | Typed HTTP client (`request`, `ApiError`, `wsUrl`, auth/session/waitlist/profile calls, `submitFeedback`/`describeFeedbackError`) |
+| `frontend/src/lib/auth.tsx` | AuthProvider — Google sign-in, `localStorage` session persistence, 401-only clearing, `profileEmpty` state + `markProfileFilled`, `feedbackEnabled` |
+| `frontend/src/lib/types.ts` | Shared TS types (`SessionInfo`, `ChatMessage`, `StreamFrame`, `ToolInfo`, `BusinessProfile`, `FeedbackCategory`) |
+| `frontend/src/lib/feedbackLifecycle.ts` | Parent-owned feedback request rules: one request at a time, sequence guard so only the owning completion publishes state, no `close`/`cancel` method for a dialog dismissal to reach, and `abort()` (unmount cleanup only) reported as `delivery: "uncertain"`. `send`/`describeError` are injected so it is testable with no DOM and no network |
 | `frontend/src/hooks/useChatSession.ts` | Chat workspace state: sessions, active session, WS streaming, rename/delete |
 | `frontend/src/App.tsx` | Routes: `/` landing, `/chat` (protected), `/business-profile` (protected), `*` → `/`; `HomeRedirect` sends profile-empty users to `/business-profile` |
 | `frontend/src/pages/LandingPage.tsx` | Landing hero/CTA + sign-in block |
@@ -141,5 +150,14 @@ Functional end-to-end pipeline with Google OAuth authentication and a working fr
 | `frontend/src/pages/BusinessProfilePage.tsx` | First-fill profile page — collects the seven profile fields, Save → `/chat`, "Skip for now" |
 | `frontend/src/components/chat/Sidebar.tsx` | Session list with per-session ⋯ menu (rename inline, delete confirm) + "Business profile" button |
 | `frontend/src/components/messages/` | Per-tool message card components, keyed by message `type` (incl. `LegalResearchCard`, `CaseSearchCard`, `IssueRegisterCard`) |
+| `frontend/tests/` | Node built-in runner, **no test framework installed**: `feedback-lifecycle.test.ts` (lifecycle rules with an injected fake `send`, so nothing reaches `POST /feedback`) and `feedback-dialog-invariants.test.ts` (source assertions pinning close-only behaviour). Run `npm test` in `frontend/`; the lifecycle module and `ChatPage` were checked to be free of DOM dependencies so this stays possible |
+
+Feedback sheets are read **read-only** when verifying: use the
+`spreadsheets.readonly` scope and `values.get` / `spreadsheets.get`. Never issue
+an update, insert, clear or delete against the feedback tab, and never send a
+second submission just to observe the `429` — the cooldown and duplicate-row
+guards are covered by `backend/tests/test_feedback.py`. See `docs/feedback.md`
+for the record of the three manual submissions and what has **not** been checked
+in a browser.
 
 Before running either service, ensure the Prisma client is generated: `make generate`.

@@ -14,6 +14,9 @@ type SidebarProps = {
   onNewChat: () => void
   onSignOut: () => void
   onClose?: () => void
+  /** When false the feedback entry point is hidden (feature switched off). */
+  feedbackEnabled?: boolean
+  onOpenFeedback?: (trigger: HTMLButtonElement | null) => void
 }
 
 type MenuState = { id: string; x: number; y: number }
@@ -40,12 +43,15 @@ export function Sidebar({
   onNewChat,
   onSignOut,
   onClose,
+  feedbackEnabled = false,
+  onOpenFeedback,
 }: SidebarProps) {
   const [menu, setMenu] = useState<MenuState | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draftName, setDraftName] = useState('')
   const cancelEditRef = useRef(false)
+  const feedbackTriggerRef = useRef<HTMLButtonElement | null>(null)
   const navigate = useNavigate()
 
   const closeMenu = () => {
@@ -160,6 +166,30 @@ export function Sidebar({
             ),
           )}
         </nav>
+
+        {feedbackEnabled && (
+          <div className="sidebar-bottom">
+            <button
+              type="button"
+              className="feedback-btn-sidebar"
+              ref={feedbackTriggerRef}
+              onClick={(event) => onOpenFeedback?.(event.currentTarget)}
+            >
+              <span className="feedback-btn-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="14" height="14" focusable="false">
+                  <path
+                    d="M2 3.2A1.7 1.7 0 0 1 3.7 1.5h8.6A1.7 1.7 0 0 1 14 3.2v6.1a1.7 1.7 0 0 1-1.7 1.7H6.6L3 13.5V11H3.7A1.7 1.7 0 0 1 2 9.3z"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              Feedback
+            </button>
+          </div>
+        )}
 
         <div className="sidebar-footer">
           <div className="user-chip">

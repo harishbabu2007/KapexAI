@@ -70,6 +70,11 @@ The `.env` file is in `.gitignore` — **it will never be committed**. Each dev 
 
 > **Where does this URL come from?** Ask the lead dev for the database credentials. In production it comes from a vault / CI secret.
 
+`.env.example` lists every variable the project reads, with placeholder values.
+Copy it and fill in what you need — you do not have to set all of them. The
+optional groups (`GOOGLE_*` redirect flow, the tool API keys, and the feedback →
+Google Sheets block) only matter if you are working on that part of the app.
+
 ### 3. Generate the Prisma client
 
 Prisma needs to generate its Python client from the schema:
@@ -120,6 +125,26 @@ make dev-worker
 ```
 
 Hit Ctrl+C to stop either one.
+
+---
+
+## Optional features
+
+Some parts of the app are switched off until someone deliberately turns them on.
+An unset or `false` flag never breaks anything else — the app just hides the
+relevant UI.
+
+| Feature | Flag | Where to read more |
+|---|---|---|
+| Feedback → Google Sheets | `FEEDBACK_ENABLED` | [`docs/feedback.md`](feedback.md) |
+
+With `FEEDBACK_ENABLED` unset, the Feedback button is not rendered and
+`POST /feedback` returns `503`. You do not need Google credentials, a
+spreadsheet, or any extra setup to work on the rest of the codebase. If you *do*
+want to work on feedback, ask the lead for Editor access to the shared
+spreadsheet and put **your own** service-account key outside the repo (for
+example `~/.config/kapexai/feedback-service-account.json`) — never commit a key
+file or a teammate's key.
 
 ---
 

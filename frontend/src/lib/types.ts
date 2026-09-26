@@ -4,6 +4,18 @@ export type AuthenticatedUser = {
   name: string | null
 }
 
+/** The three buckets offered by the feedback dialog. Stored in the sheet verbatim. */
+export type FeedbackCategory = 'bug' | 'feature_request' | 'general'
+
+/**
+ * How far a feedback submission got.
+ *
+ * `delivered` means the row is in the sheet. `uncertain` means the request was
+ * sent but the response never confirmed it — the row may already exist, so
+ * resubmitting can create a duplicate. `failed` means nothing was written.
+ */
+export type FeedbackDelivery = 'delivered' | 'uncertain' | 'failed'
+
 /**
  * The user's saved business profile. Every key is optional — a blank (or all
  * empty) profile means the worker treats the user as having no head-start

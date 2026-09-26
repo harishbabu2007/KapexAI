@@ -10,6 +10,7 @@ from jose import jwt, JWTError
 from db_service import db
 from backend.models.models import GoogleTokenRequest
 from backend.utils.db_utils import business_profile_is_empty, ensure_business_profile
+from backend.utils.feedback_config import feedback_enabled
 from backend.utils.jwt_utils import create_token, decode_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -119,6 +120,10 @@ async def google_oauth_token(request: GoogleTokenRequest):
             "name": user.name,
         },
         "profile_empty": profile_empty,
+        # Read from the environment only — authentication must never trigger a
+        # Google Sheets call. The frontend hides the feedback entry point when
+        # this is false; POST /feedback re-checks the configuration itself.
+        "feedback_enabled": feedback_enabled(),
     }
 
 
@@ -194,6 +199,7 @@ async def google_oauth_callback(code: str):
         "email": user.email,
         "name": user.name,
         "user_id": user.id,
+        "feedback_enabled": feedback_enabled(),
     }
 
 
@@ -236,4 +242,5 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         "email": user.email,
         "name": user.name,
         "profile_empty": profile_empty,
+        "feedback_enabled": feedback_enabled(),
     }

@@ -24,6 +24,12 @@ type AuthContextValue = {
    * fresh signups and un-filed profiles.
    */
   profileEmpty: boolean | null
+  /**
+   * Whether the backend has feedback switched on. `null` while unknown (during
+   * restore) and `false` when an older backend omits the field, so the UI
+   * defaults to hiding the feedback entry point.
+   */
+  feedbackEnabled: boolean | null
   signInWithGoogle: (credential: string) => Promise<void>
   /** Marks the business profile as filled after a successful save. */
   markProfileFilled: () => void
@@ -47,6 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null)
   const [user, setUser] = useState<AuthenticatedUser | null>(null)
   const [profileEmpty, setProfileEmpty] = useState<boolean | null>(null)
+  const [feedbackEnabled, setFeedbackEnabled] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -68,6 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setToken(stored.token)
         setUser(fresh)
         setProfileEmpty(fresh.profile_empty)
+        setFeedbackEnabled(fresh.feedback_enabled ?? false)
       } catch (err) {
         if (cancelled) return
         if (err instanceof ApiError && err.status === 401) {
@@ -77,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setToken(null)
           setUser(null)
           setProfileEmpty(null)
+          setFeedbackEnabled(null)
         } else {
           // Transient failure (network, backend down) — keep the stored
           // session so a hiccup doesn't log the user out.
@@ -101,6 +110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(result.access_token)
     setUser(result.user)
     setProfileEmpty(result.profile_empty)
+    setFeedbackEnabled(result.feedback_enabled ?? false)
   }, [])
 
   const markProfileFilled = useCallback(() => {
@@ -113,11 +123,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(null)
     setUser(null)
     setProfileEmpty(null)
+    setFeedbackEnabled(null)
   }, [])
 
   const value = useMemo(
-    () => ({ user, token, loading, profileEmpty, signInWithGoogle: signInWithGoogleCallback, markProfileFilled, signOut }),
-    [user, token, loading, profileEmpty, signInWithGoogleCallback, markProfileFilled, signOut],
+    () => ({ user, token, loading, profileEmpty, feedbackEnabled, signInWithGoogle: signInWithGoogleCallback, markProfileFilled, signOut }),
+    [user, token, loading, profileEmpty, feedbackEnabled, signInWithGoogleCallback, markProfileFilled, signOut],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

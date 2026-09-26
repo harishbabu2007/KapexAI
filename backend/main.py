@@ -34,7 +34,9 @@ from .utils.db_utils import (
     get_session,
     get_all_sessions,
 )
+from .utils.feedback_sheets import close_feedback_clients
 from .routers import auth
+from .routers.feedback import router as feedback_router
 from .middleware.auth import get_current_user
 
 # Marks a session's most recent message that is still being processed by the
@@ -59,9 +61,14 @@ async def mark_pending(session_id: str, content: str, msg_type: str) -> None:
 async def lifespan(app: FastAPI):
     await connect_db()
     await connect_redis()
-    yield
-    await disconnect_db()
-    await disconnect_redis()
+    try:
+        yield
+    finally:
+        # Closes the lazily-created Sheets client. Feedback is initialized on
+        # first use, so there is nothing to close when it was never enabled.
+        await close_feedback_clients()
+        await disconnect_db()
+        await disconnect_redis()
 
 
 app = FastAPI(title="KapexAI Backend", lifespan=lifespan)
@@ -79,6 +86,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(feedback_router)
 
 
 @app.get("/health")
