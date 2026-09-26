@@ -91,6 +91,7 @@ class TestGoogleOAuthToken:
             ),
             patch("backend.routers.auth.db", mock_db),
             patch("backend.utils.db_utils.db", mock_utils_db),
+            patch("backend.routers.auth.feedback_enabled", return_value=True),
         ):
             async with client as c:
                 response = await c.post("/auth/google", json={"credential": "fake-token"})
@@ -100,6 +101,7 @@ class TestGoogleOAuthToken:
         assert data["access_token"]
         assert data["user"] == {"id": "u1", "email": "new@test.com", "name": "New User"}
         assert data["profile_empty"] is True
+        assert data["feedback_enabled"] is True
         mock_db.user.create.assert_awaited_once()
         mock_utils_db.businessprofile.create.assert_awaited_once()
 
@@ -185,6 +187,7 @@ class TestAuthMe:
             patch.object(jwt_utils, "JWT_SECRET", "test-secret"),
             patch("backend.routers.auth.db", mock_db),
             patch("backend.utils.db_utils.db", mock_utils_db),
+            patch("backend.routers.auth.feedback_enabled", return_value=True),
         ):
             from backend.utils.jwt_utils import create_token
             token = create_token({"user_id": "u1", "email": "me@test.com"})
@@ -200,6 +203,7 @@ class TestAuthMe:
             "email": "me@test.com",
             "name": "Me",
             "profile_empty": True,
+            "feedback_enabled": True,
         }
 
     @pytest.mark.asyncio
@@ -217,6 +221,7 @@ class TestAuthMe:
             patch.object(jwt_utils, "JWT_SECRET", "test-secret"),
             patch("backend.routers.auth.db", mock_db),
             patch("backend.utils.db_utils.db", mock_utils_db),
+            patch("backend.routers.auth.feedback_enabled", return_value=False),
         ):
             from backend.utils.jwt_utils import create_token
             token = create_token({"user_id": "u1", "email": "me@test.com"})
@@ -228,6 +233,9 @@ class TestAuthMe:
 
         assert response.status_code == 200
         assert response.json()["profile_empty"] is False
+        # The flag is reported independently of the profile state, so a client can
+        # hide the feedback entry point even for a filled-in profile.
+        assert response.json()["feedback_enabled"] is False
 
     @pytest.mark.asyncio
     async def test_returns_401_when_token_invalid(self, client):

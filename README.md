@@ -55,3 +55,11 @@ make dev-worker    # background worker
 
 The frontend is not built yet. Until it is, the chat session can be driven
 through the backend API directly.
+
+## Feedback
+
+The chat workspace has a **Feedback** button that appends the user's message to
+a Google Sheet through the authenticated backend. It is off by default
+(`FEEDBACK_ENABLED=false`) and never touches the LLM worker or the database
+schema. Setup, the sheet contract, rate limits and the delivery limitations are
+in [docs/feedback.md](docs/feedback.md).

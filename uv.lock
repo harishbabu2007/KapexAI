@@ -185,6 +185,7 @@ source = { editable = "backend" }
 dependencies = [
     { name = "db-service" },
     { name = "fastapi" },
+    { name = "google-auth", extra = ["requests"] },
     { name = "httpx" },
     { name = "python-jose" },
     { name = "redis-service" },
@@ -195,6 +196,7 @@ dependencies = [
 requires-dist = [
     { name = "db-service", editable = "services/database" },
     { name = "fastapi", specifier = ">=0.110.0" },
+    { name = "google-auth", extras = ["requests"], specifier = ">=2.58.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "python-jose", specifier = ">=3.5.0" },
     { name = "redis-service", editable = "services/redis-service" },

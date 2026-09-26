@@ -1,0 +1,59 @@
+# Docker build context exclusions for Dockerfile.backend / Dockerfile.worker
+#
+# Goal: keep secrets, local environment files, dependency caches and generated
+# output out of the image, while preserving every directory the build and the
+# runtime actually need (pyproject.toml, uv.lock, backend/, worker/,
+# services/, .env.example, docs/, dummy_tools/).
+
+# ── Version control & CI ───────────────────────────────────────
+.git
+.gitignore
+.github
+.opencode
+.vscode
+
+# ── Secrets and local environment ──────────────────────────────
+# The backend loads a root .env on startup; a committed image layer must never
+# carry a developer's credentials.
+.env
+.env.*
+**/.env
+**/.env.*
+# …but keep the documented placeholders.
+!.env.example
+!**/.env.example
+# Service-account key files, wherever they were dropped locally.
+**/*service-account*.json
+**/*service_account*.json
+
+# ── Python environments & caches ───────────────────────────────
+.venv
+venv
+ENV
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.tox
+.nox
+.coverage
+htmlcov
+# Generated Prisma client — regenerated inside the image by
+# `prisma generate` / `prisma py fetch`, so shipping a host copy is wrong.
+.prisma
+**/.prisma
+
+# ── Frontend dependencies & build output ───────────────────────
+node_modules
+**/node_modules
+frontend/dist
+frontend/.vite
+*.log
+npm-debug.log*
+
+# ── Local scratch ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
